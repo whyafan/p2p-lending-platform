@@ -1,0 +1,14 @@
+{
+  "name": "nexusfi-protocol",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev --prefix frontend",
+    "build": "npm run build --prefix frontend",
+    "node": "npm run node --prefix contracts",
+    "deploy:local": "npm run deploy:local --prefix contracts",
+    "deploy:mock-tokens:local": "npm run deploy:mock-tokens:local --prefix contracts"
+  },
+  "devDependencies": {
+    "hardhat": "^3.4.5"
+  }
+}

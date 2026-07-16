@@ -1,0 +1,96 @@
+{
+  "_format": "hh3-artifact-1",
+  "contractName": "MockPriceFeed",
+  "sourceName": "contracts/MockPriceFeed.sol",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "initialPrice_",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "constructor"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "oldPrice",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "newPrice",
+          "type": "uint256"
+        }
+      ],
+      "name": "PriceUpdated",
+      "type": "event"
+    },
+    {
+      "inputs": [],
+      "name": "ethUsdPrice",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "latestPrice",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "owner",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "newPrice",
+          "type": "uint256"
+        }
+      ],
+      "name": "setPrice",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x6080604052348015600e575f5ffd5b50604051610205380380610205833981016040819052602b916043565b5f55600180546001600160a01b031916331790556059565b5f602082840312156052575f5ffd5b5051919050565b61019f806100665f395ff3fe608060405234801561000f575f5ffd5b506004361061004a575f3560e01c80638da5cb5b1461004e57806391b7f5ed1461007e5780639478ab8c14610093578063a3e6ba94146100a9575b5f5ffd5b600154610061906001600160a01b031681565b6040516001600160a01b0390911681526020015b60405180910390f35b61009161008c366004610152565b6100b0565b005b61009b5f5481565b604051908152602001610075565b5f5461009b565b6001546001600160a01b0316331461010e5760405162461bcd60e51b815260206004820152601860248201527f4d6f636b5072696365466565643a206e6f74206f776e65720000000000000000604482015260640160405180910390fd5b5f80549082905560408051828152602081018490527f945c1c4e99aa89f648fbfe3df471b916f719e16d960fcec0737d4d56bd696838910160405180910390a15050565b5f60208284031215610162575f5ffd5b503591905056fea2646970667358221220e9257f3006b7b7443fb5c6679b72681d5a37e4b6a68789c38dc05e6088c3750964736f6c634300081c0033",
+  "deployedBytecode": "0x608060405234801561000f575f5ffd5b506004361061004a575f3560e01c80638da5cb5b1461004e57806391b7f5ed1461007e5780639478ab8c14610093578063a3e6ba94146100a9575b5f5ffd5b600154610061906001600160a01b031681565b6040516001600160a01b0390911681526020015b60405180910390f35b61009161008c366004610152565b6100b0565b005b61009b5f5481565b604051908152602001610075565b5f5461009b565b6001546001600160a01b0316331461010e5760405162461bcd60e51b815260206004820152601860248201527f4d6f636b5072696365466565643a206e6f74206f776e65720000000000000000604482015260640160405180910390fd5b5f80549082905560408051828152602081018490527f945c1c4e99aa89f648fbfe3df471b916f719e16d960fcec0737d4d56bd696838910160405180910390a15050565b5f60208284031215610162575f5ffd5b503591905056fea2646970667358221220e9257f3006b7b7443fb5c6679b72681d5a37e4b6a68789c38dc05e6088c3750964736f6c634300081c0033",
+  "linkReferences": {},
+  "deployedLinkReferences": {},
+  "immutableReferences": {},
+  "inputSourceName": "project/contracts/MockPriceFeed.sol",
+  "buildInfoId": "solc-0_8_28-814484964c660d7bb19fbdd283a5401fd558c14b"
+}
