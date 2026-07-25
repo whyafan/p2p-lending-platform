@@ -27,6 +27,13 @@ __pycache__/
 # Dependencies
 node_modules/
 vendor/
+venv/
+env/
+*.tsbuildinfo
+
+# Hardhat build artifacts
+artifacts/
+cache/
 
 # Environment and secret files
 .env
