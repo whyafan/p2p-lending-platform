@@ -14,73 +14,13 @@ import { formatEther } from 'viem';
 import { sepolia, hardhat } from 'wagmi/chains';
 import { inferRiskTierFromBps, RISK_TIER_CONFIG, BASE_APR } from '../lib/loan-terms';
 import { formatUsd, formatPercent } from '../lib/format';
-import { ClipboardList, TrendingUp, Check, Hexagon } from 'lucide-react';
+import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
+import { ClipboardList, TrendingUp, Check, Hexagon, AlertTriangle } from 'lucide-react';
 
 const FUNDING_WINDOW_SECS = 7 * 24 * 60 * 60;
-
-const FACTORY_ABI = [
-  {
-    name: 'getLoanIds',
-    type: 'function',
-    inputs: [],
-    outputs: [{ name: '', type: 'uint256[]' }],
-    stateMutability: 'view',
-  },
-  {
-    name: 'loans',
-    type: 'function',
-    inputs: [{ name: 'loanId', type: 'uint256' }],
-    outputs: [
-      {
-        name: '',
-        type: 'tuple',
-        components: [
-          { name: 'loanContract', type: 'address' },
-          { name: 'borrower', type: 'address' },
-          { name: 'principalAmount', type: 'uint256' },
-          { name: 'collateralAmount', type: 'uint256' },
-          { name: 'durationDays', type: 'uint256' },
-          { name: 'interestBps', type: 'uint256' },
-          { name: 'maxLtvBps', type: 'uint256' },
-          { name: 'liquidationBufferBps', type: 'uint256' },
-          { name: 'createdAt', type: 'uint256' },
-        ],
-      },
-    ],
-    stateMutability: 'view',
-  },
-] as const;
-
-const LOAN_ABI = [
-  {
-    name: 'status',
-    type: 'function',
-    inputs: [],
-    outputs: [{ name: '', type: 'uint8' }],
-    stateMutability: 'view',
-  },
-  {
-    name: 'lender',
-    type: 'function',
-    inputs: [],
-    outputs: [{ name: '', type: 'address' }],
-    stateMutability: 'view',
-  },
-  {
-    name: 'fund',
-    type: 'function',
-    inputs: [],
-    outputs: [],
-    stateMutability: 'payable',
-  },
-  {
-    name: 'markLiquidatedForDemo',
-    type: 'function',
-    inputs: [],
-    outputs: [],
-    stateMutability: 'nonpayable',
-  },
-] as const;
+// Mirrors Loan.sol's GRACE_PERIOD constant, for client-side countdown display only —
+// the contract's isLiquidatable() is always the source of truth for the actual gate.
+const GRACE_PERIOD_SECS = 2 * 24 * 60 * 60;
 
 // LoanStatus enum values from Loan.sol
 const STATUS_LABEL = ['Requested', 'Funded', 'Repaid', 'Cancelled', 'Liquidated'] as const;
@@ -110,6 +50,18 @@ function timeLeft(createdAt: bigint): string {
 function isExpired(createdAt: bigint): boolean {
   const deadline = Number(createdAt) + FUNDING_WINDOW_SECS;
   return Math.floor(Date.now() / 1000) > deadline;
+}
+
+// Countdown until liquidate() actually becomes callable (repaymentDueAt + grace
+// period). repaymentDueAt is undefined while state is still loading.
+function liquidationCountdown(repaymentDueAt: bigint | undefined): string | null {
+  if (repaymentDueAt === undefined) return null;
+  const eligibleAt = Number(repaymentDueAt) + GRACE_PERIOD_SECS;
+  const remaining = eligibleAt - Math.floor(Date.now() / 1000);
+  if (remaining <= 0) return null;
+  const d = Math.floor(remaining / 86400);
+  const h = Math.floor((remaining % 86400) / 3600);
+  return d > 0 ? `${d}d ${h}h until liquidatable` : `${h}h until liquidatable`;
 }
 
 type LoanTermsTuple = {
@@ -229,6 +181,43 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     query: { enabled: lenderContracts.length > 0, refetchInterval: 30_000 },
   });
 
+  // ── Round 4: real delinquency/liquidation state for funded loans only ──
+  const isLiquidatableContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({
+          address: addr,
+          abi: LOAN_ABI,
+          functionName: 'isLiquidatable' as const,
+          chainId,
+        })),
+    [loanContractAddresses, chainId],
+  );
+
+  const repaymentDueAtContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({
+          address: addr,
+          abi: LOAN_ABI,
+          functionName: 'repaymentDueAt' as const,
+          chainId,
+        })),
+    [loanContractAddresses, chainId],
+  );
+
+  const { data: isLiquidatableResults, refetch: refetchIsLiquidatable } = useReadContracts({
+    contracts: isLiquidatableContracts,
+    query: { enabled: isLiquidatableContracts.length > 0, refetchInterval: 15_000 },
+  });
+
+  const { data: repaymentDueAtResults, refetch: refetchRepaymentDueAt } = useReadContracts({
+    contracts: repaymentDueAtContracts,
+    query: { enabled: repaymentDueAtContracts.length > 0, refetchInterval: 30_000 },
+  });
+
   // Address-keyed maps so statusResults/lenderResults indices never drift from loanIds indices
   // (statusContracts filters out undefined entries, making its length < loanIds.length when any
   //  terms call fails — direct index access then maps the wrong result to the wrong loan.)
@@ -250,8 +239,32 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     return map;
   }, [lenderContracts, lenderResults]);
 
+  const isLiquidatableByAddress = useMemo(() => {
+    const map = new Map<string, boolean>();
+    isLiquidatableContracts.forEach((c, i) => {
+      const r = isLiquidatableResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as boolean);
+    });
+    return map;
+  }, [isLiquidatableContracts, isLiquidatableResults]);
+
+  const repaymentDueAtByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    repaymentDueAtContracts.forEach((c, i) => {
+      const r = repaymentDueAtResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [repaymentDueAtContracts, repaymentDueAtResults]);
+
   async function refetchAll() {
-    await Promise.all([refetchIds(), refetchStatus(), refetchLenders()]);
+    await Promise.all([
+      refetchIds(),
+      refetchStatus(),
+      refetchLenders(),
+      refetchIsLiquidatable(),
+      refetchRepaymentDueAt(),
+    ]);
   }
 
   // ── Fund tx ──
@@ -282,9 +295,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const loanAddr = terms?.loanContract?.toLowerCase();
       const statusVal = loanAddr !== undefined ? statusByAddress.get(loanAddr) : undefined;
       const lenderAddr = loanAddr !== undefined ? lenderByAddress.get(loanAddr) : undefined;
-      return { id, terms, statusVal, lenderAddr };
+      const isLiquidatableVal = loanAddr !== undefined ? isLiquidatableByAddress.get(loanAddr) : undefined;
+      const repaymentDueAtVal = loanAddr !== undefined ? repaymentDueAtByAddress.get(loanAddr) : undefined;
+      return { id, terms, statusVal, lenderAddr, isLiquidatableVal, repaymentDueAtVal };
     });
-  }, [loanIds, termsResults, statusByAddress, lenderByAddress]);
+  }, [loanIds, termsResults, statusByAddress, lenderByAddress, isLiquidatableByAddress, repaymentDueAtByAddress]);
 
   const openLoans = useMemo(
     () => loans.filter((l) => l.statusVal === 0 && l.terms && !isExpired(l.terms.createdAt)),
@@ -327,7 +342,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     }
   }
 
-  async function liquidateDemo(loanContractAddr: `0x${string}`, loanId: bigint) {
+  async function liquidateLoan(loanContractAddr: `0x${string}`, loanId: bigint) {
     setLiqLoanId(loanId);
     setLiqHash(undefined);
     try {
@@ -335,7 +350,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const hash = await writeContractAsync({
         address: loanContractAddr,
         abi: LOAN_ABI,
-        functionName: 'markLiquidatedForDemo',
+        functionName: 'liquidate',
         chainId,
       });
       setLiqHash(hash);
@@ -643,7 +658,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 { n: '2', text: 'Click Fund to send the exact principal amount. Your ETH goes directly to the borrower.' },
                 { n: '3', text: 'The borrower repays principal + interest within the loan duration' },
                 { n: '4', text: 'Repayment is sent to your wallet. Their collateral is released.' },
-                { n: '5', text: 'If LTV exceeds the liquidation threshold, click Liquidate to seize collateral.' },
+                { n: '5', text: "If the borrower misses the repayment deadline (plus a short grace period), Liquidate becomes available to seize their collateral." },
               ].map(({ n, text }) => (
                 <li key={n} className="flex items-start gap-3">
                   <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-slate-800 text-[10px] font-black text-slate-500">{n}</span>
@@ -675,7 +690,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             </div>
           ) : (
             <div className="space-y-3">
-              {myPositions.map(({ id, terms }) => {
+              {myPositions.map(({ id, terms, isLiquidatableVal, repaymentDueAtVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -700,6 +715,17 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                     : null;
 
                 const isLiquidating = liqLoanId === id;
+                // The real, on-chain gate: liquidate() only succeeds once this is true.
+                const canLiquidate = isLiquidatableVal === true;
+                const countdown = liquidationCountdown(repaymentDueAtVal);
+                const dueDate =
+                  repaymentDueAtVal !== undefined
+                    ? new Date(Number(repaymentDueAtVal) * 1000).toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric',
+                      })
+                    : null;
 
                 return (
                   <div
@@ -720,6 +746,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         {isLtvBreached && (
                           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border border-red-500/40 bg-red-500/20 text-red-400">
                             LTV BREACH
+                          </span>
+                        )}
+                        {canLiquidate && (
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border border-red-500/40 bg-red-500/20 text-red-400 flex items-center gap-1">
+                            <AlertTriangle className="h-2.5 w-2.5" /> LIQUIDATABLE
                           </span>
                         )}
                       </div>
@@ -788,13 +819,19 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         Collateral: <span className="font-mono text-slate-400">{collateralEth.toFixed(4)} ETH</span>
                         {collateralUsd && <span className="ml-1">({formatUsd(collateralUsd)})</span>}
                       </span>
+                      {dueDate && (
+                        <span>
+                          Repayment due: <span className="font-mono text-slate-400">{dueDate}</span>
+                        </span>
+                      )}
                     </div>
 
-                    {/* Liquidate demo button */}
+                    {/* Liquidate button — gated on-chain by isLiquidatable() (deadline + grace period) */}
                     <div className="mt-4 flex items-center gap-3">
                       <button
-                        onClick={() => void liquidateDemo(terms.loanContract, id)}
-                        disabled={isLiquidating && (isLiqConfirming || !liqHash)}
+                        onClick={() => void liquidateLoan(terms.loanContract, id)}
+                        disabled={!canLiquidate || (isLiquidating && (isLiqConfirming || !liqHash))}
+                        title={!canLiquidate ? 'Not liquidatable yet — the borrower is still within the repayment deadline or grace period' : undefined}
                         className="h-9 px-4 rounded-lg border border-red-500/30 bg-red-500/10 text-xs font-bold text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
                       >
                         {isLiquidating && !liqHash ? (
@@ -810,10 +847,14 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         ) : isLiquidating && isLiqConfirmed ? (
                           'Liquidated'
                         ) : (
-                          'Liquidate (demo)'
+                          'Liquidate'
                         )}
                       </button>
-                      <span className="text-[10px] text-slate-700">Seizes collateral immediately (demo only)</span>
+                      <span className="text-[10px] text-slate-700">
+                        {canLiquidate
+                          ? 'Borrower is delinquent — seizes collateral, no further checks.'
+                          : countdown ?? 'Not yet liquidatable.'}
+                      </span>
                     </div>
 
                     {isLiquidating && liqHash && (

@@ -1,58 +1,23 @@
 'use client';
 
-import { useMemo, useEffect } from 'react';
-import { useReadContract, useReadContracts, useAccount } from 'wagmi';
-import { formatEther } from 'viem';
-import { sepolia, hardhat } from 'wagmi/chains';
+import { useMemo, useEffect, useState } from 'react';
+import {
+  useReadContract,
+  useReadContracts,
+  useAccount,
+  useWriteContract,
+  useWaitForTransactionReceipt,
+  useSwitchChain,
+} from 'wagmi';
+import { formatEther, parseEther } from 'viem';
+import { sepolia } from 'wagmi/chains';
 import { inferRiskTierFromBps } from '../lib/loan-terms';
 import { formatUsd } from '../lib/format';
-import { Hexagon } from 'lucide-react';
+import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
+import { Hexagon, Check, AlertTriangle } from 'lucide-react';
 
 export const MAX_OPEN_REQUESTS = 3;
 const FUNDING_WINDOW_SECS = 7 * 24 * 60 * 60;
-
-const FACTORY_ABI = [
-  {
-    name: 'getLoanIds',
-    type: 'function',
-    inputs: [],
-    outputs: [{ name: '', type: 'uint256[]' }],
-    stateMutability: 'view',
-  },
-  {
-    name: 'loans',
-    type: 'function',
-    inputs: [{ name: 'loanId', type: 'uint256' }],
-    outputs: [
-      {
-        name: '',
-        type: 'tuple',
-        components: [
-          { name: 'loanContract', type: 'address' },
-          { name: 'borrower', type: 'address' },
-          { name: 'principalAmount', type: 'uint256' },
-          { name: 'collateralAmount', type: 'uint256' },
-          { name: 'durationDays', type: 'uint256' },
-          { name: 'interestBps', type: 'uint256' },
-          { name: 'maxLtvBps', type: 'uint256' },
-          { name: 'liquidationBufferBps', type: 'uint256' },
-          { name: 'createdAt', type: 'uint256' },
-        ],
-      },
-    ],
-    stateMutability: 'view',
-  },
-] as const;
-
-const LOAN_ABI = [
-  {
-    name: 'status',
-    type: 'function',
-    inputs: [],
-    outputs: [{ name: '', type: 'uint8' }],
-    stateMutability: 'view',
-  },
-] as const;
 
 const STATUS_LABEL = ['Requested', 'Funded', 'Repaid', 'Cancelled', 'Liquidated'] as const;
 const STATUS_COLORS: Record<number, string> = {
@@ -137,6 +102,18 @@ type Props = {
 
 export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, ethPrice, onPendingCountChange }: Props) {
   const { address } = useAccount();
+  const { switchChainAsync } = useSwitchChain();
+  const { writeContractAsync, isPending: isRepayPending } = useWriteContract();
+
+  const [repayingLoanId, setRepayingLoanId] = useState<bigint | null>(null);
+  const [repayHash, setRepayHash] = useState<`0x${string}` | undefined>(undefined);
+  const [repayError, setRepayError] = useState<string | null>(null);
+  const [repayErrorLoanId, setRepayErrorLoanId] = useState<bigint | null>(null);
+  const [repayAmountInputs, setRepayAmountInputs] = useState<Record<string, string>>({});
+
+  const { isLoading: isRepayConfirming, isSuccess: isRepayConfirmed } = useWaitForTransactionReceipt({
+    hash: repayHash,
+  });
 
   const isDeployed = Boolean(
     factoryAddress &&
@@ -184,8 +161,8 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
       .filter((i): i is number => i !== null);
   }, [loanIds, termsResults, address]);
 
-  // Round 3: status for each of the borrower's loan contracts
-  const statusContracts = useMemo(
+  // Addresses of every loan contract belonging to this borrower
+  const myLoanAddresses = useMemo(
     () =>
       myLoanIndices
         .map((i) => {
@@ -194,17 +171,68 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
             ? (r.result as LoanTermsTuple).loanContract
             : undefined;
         })
-        .filter((a): a is `0x${string}` => Boolean(a))
-        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'status' as const, chainId })),
-    [myLoanIndices, termsResults, chainId],
+        .filter((a): a is `0x${string}` => Boolean(a)),
+    [myLoanIndices, termsResults],
   );
 
-  const { data: statusResults } = useReadContracts({
+  // Round 3: status for each of the borrower's loan contracts
+  const statusContracts = useMemo(
+    () => myLoanAddresses.map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'status' as const, chainId })),
+    [myLoanAddresses, chainId],
+  );
+
+  const { data: statusResults, refetch: refetchStatus } = useReadContracts({
     contracts: statusContracts,
     query: { enabled: statusContracts.length > 0, refetchInterval: 15_000 },
   });
 
-  // Address-keyed map so statusResults indices never drift from myLoanIndices
+  // Round 4: live repayment state — read for all of the borrower's loans; only
+  // Funded ones display it, but there's no harm reading it for the rest.
+  const outstandingContracts = useMemo(
+    () =>
+      myLoanAddresses.map((addr) => ({
+        address: addr,
+        abi: LOAN_ABI,
+        functionName: 'outstandingBalance' as const,
+        chainId,
+      })),
+    [myLoanAddresses, chainId],
+  );
+  const repaymentDueAtContracts = useMemo(
+    () =>
+      myLoanAddresses.map((addr) => ({
+        address: addr,
+        abi: LOAN_ABI,
+        functionName: 'repaymentDueAt' as const,
+        chainId,
+      })),
+    [myLoanAddresses, chainId],
+  );
+  const isDelinquentContracts = useMemo(
+    () =>
+      myLoanAddresses.map((addr) => ({
+        address: addr,
+        abi: LOAN_ABI,
+        functionName: 'isDelinquent' as const,
+        chainId,
+      })),
+    [myLoanAddresses, chainId],
+  );
+
+  const { data: outstandingResults, refetch: refetchOutstanding } = useReadContracts({
+    contracts: outstandingContracts,
+    query: { enabled: outstandingContracts.length > 0, refetchInterval: 15_000 },
+  });
+  const { data: repaymentDueAtResults, refetch: refetchRepaymentDueAt } = useReadContracts({
+    contracts: repaymentDueAtContracts,
+    query: { enabled: repaymentDueAtContracts.length > 0, refetchInterval: 30_000 },
+  });
+  const { data: isDelinquentResults, refetch: refetchIsDelinquent } = useReadContracts({
+    contracts: isDelinquentContracts,
+    query: { enabled: isDelinquentContracts.length > 0, refetchInterval: 15_000 },
+  });
+
+  // Address-keyed maps so result indices never drift from myLoanIndices
   const statusByAddress = useMemo(() => {
     const map = new Map<string, number>();
     statusContracts.forEach((c, i) => {
@@ -213,6 +241,37 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     });
     return map;
   }, [statusContracts, statusResults]);
+
+  const outstandingByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    outstandingContracts.forEach((c, i) => {
+      const r = outstandingResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [outstandingContracts, outstandingResults]);
+
+  const repaymentDueAtByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    repaymentDueAtContracts.forEach((c, i) => {
+      const r = repaymentDueAtResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [repaymentDueAtContracts, repaymentDueAtResults]);
+
+  const isDelinquentByAddress = useMemo(() => {
+    const map = new Map<string, boolean>();
+    isDelinquentContracts.forEach((c, i) => {
+      const r = isDelinquentResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as boolean);
+    });
+    return map;
+  }, [isDelinquentContracts, isDelinquentResults]);
+
+  async function refetchAll() {
+    await Promise.all([refetchStatus(), refetchOutstanding(), refetchRepaymentDueAt(), refetchIsDelinquent()]);
+  }
 
   // Combine and sort newest-first
   const myLoans = useMemo(() => {
@@ -223,16 +282,60 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         const terms = (termsResults[globalIdx]!.result as LoanTermsTuple);
         const loanAddr = terms?.loanContract?.toLowerCase();
         const statusVal = loanAddr ? statusByAddress.get(loanAddr) : undefined;
-        return { id, terms, statusVal };
+        const outstandingVal = loanAddr ? outstandingByAddress.get(loanAddr) : undefined;
+        const repaymentDueAtVal = loanAddr ? repaymentDueAtByAddress.get(loanAddr) : undefined;
+        const isDelinquentVal = loanAddr ? isDelinquentByAddress.get(loanAddr) : undefined;
+        return { id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal };
       })
       .sort((a, b) => Number(b.terms.createdAt) - Number(a.terms.createdAt));
-  }, [loanIds, termsResults, myLoanIndices, statusByAddress]);
+  }, [
+    loanIds,
+    termsResults,
+    myLoanIndices,
+    statusByAddress,
+    outstandingByAddress,
+    repaymentDueAtByAddress,
+    isDelinquentByAddress,
+  ]);
 
   const pendingCount = myLoans.filter((l) => l.statusVal === 0).length;
 
   useEffect(() => {
     onPendingCountChange?.(pendingCount);
   }, [pendingCount, onPendingCountChange]);
+
+  // Immediately refresh contract state after a confirmed repayment
+  useEffect(() => {
+    if (isRepayConfirmed) void refetchAll();
+  }, [isRepayConfirmed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sends `amountWei` toward a loan's live outstanding balance. Overpaying is
+  // safe — the contract caps what it applies and refunds the rest in the same
+  // transaction, which is how the "repay in full" quick action guarantees
+  // closure despite outstandingBalance() ticking up slightly between the last
+  // read and when the transaction actually mines.
+  async function repayLoan(loanContractAddr: `0x${string}`, loanId: bigint, amountWei: bigint) {
+    setRepayError(null);
+    setRepayErrorLoanId(null);
+    setRepayingLoanId(loanId);
+    setRepayHash(undefined);
+    try {
+      await switchChainAsync({ chainId });
+      const hash = await writeContractAsync({
+        address: loanContractAddr,
+        abi: LOAN_ABI,
+        functionName: 'repay',
+        value: amountWei,
+        chainId,
+      });
+      setRepayHash(hash);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Transaction failed';
+      setRepayError(msg.length > 160 ? msg.slice(0, 157) + '…' : msg);
+      setRepayErrorLoanId(loanId);
+      setRepayingLoanId(null);
+    }
+  }
 
   const storedTxs = useMemo(
     () => (address ? getStoredTxs(address) : []),
@@ -299,7 +402,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         </div>
       ) : (
         <div className="space-y-3">
-          {loansWithTx.map(({ id, terms, statusVal, txHash }) => {
+          {loansWithTx.map(({ id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, txHash }) => {
             const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
             const aprNum = Number(terms.interestBps) / 100;
             const principalEth = parseFloat(formatEther(terms.principalAmount));
@@ -309,6 +412,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
             const statusNum = statusVal ?? 0;
             const statusText = STATUS_LABEL[statusNum] ?? 'Unknown';
             const isOpen = statusNum === 0;
+            const isFunded = statusNum === 1;
             const interestUsd =
               principalUsd !== null
                 ? principalUsd * (aprNum / 100) * (Number(terms.durationDays) / 365)
@@ -318,6 +422,19 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
               'en-US',
               { month: 'short', day: 'numeric', year: 'numeric' },
             );
+
+            const dueDate =
+              repaymentDueAtVal !== undefined
+                ? new Date(Number(repaymentDueAtVal) * 1000).toLocaleDateString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
+                    year: 'numeric',
+                  })
+                : null;
+            const outstandingEth = outstandingVal !== undefined ? formatEther(outstandingVal) : null;
+            const isRepayingThis = repayingLoanId === id;
+            const idKey = id.toString();
+            const inputValue = repayAmountInputs[idKey] ?? (outstandingEth ?? '');
 
             return (
               <div
@@ -345,6 +462,12 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                     {isOpen && (
                       <span className="text-[10px] text-slate-500 font-mono">
                         {timeLeft(terms.createdAt)}
+                      </span>
+                    )}
+
+                    {isFunded && isDelinquentVal && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border border-red-500/40 bg-red-500/20 text-red-400 flex items-center gap-1">
+                        <AlertTriangle className="h-2.5 w-2.5" /> PAST DUE
                       </span>
                     )}
                   </div>
@@ -396,6 +519,102 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                     )}
                   </div>
                 </div>
+
+                {/* Repay — only meaningful once the loan is Funded */}
+                {isFunded && (
+                  <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 mb-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                      <div>
+                        <p className="text-[10px] text-slate-600">Outstanding balance (live)</p>
+                        <p className="text-sm font-mono font-bold text-amber-400">
+                          {outstandingEth !== null ? `${parseFloat(outstandingEth).toFixed(6)} ETH` : '…'}
+                        </p>
+                      </div>
+                      {dueDate && (
+                        <p className="text-[11px] text-slate-500">
+                          Due <span className={isDelinquentVal ? 'text-red-400 font-bold' : 'text-slate-400'}>{dueDate}</span>
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.000001"
+                        value={inputValue}
+                        onChange={(e) => setRepayAmountInputs((prev) => ({ ...prev, [idKey]: e.target.value }))}
+                        placeholder="Amount in ETH"
+                        className="h-9 w-40 rounded-lg border border-slate-700 bg-slate-900 px-3 text-xs font-mono text-white focus:outline-none focus:border-blue-500/60"
+                      />
+                      <button
+                        onClick={() => {
+                          const parsed = parseFloat(inputValue);
+                          if (!parsed || parsed <= 0) return;
+                          void repayLoan(terms.loanContract, id, parseEther(inputValue));
+                        }}
+                        disabled={isRepayingThis && (isRepayPending || isRepayConfirming || !repayHash)}
+                        className="h-9 px-4 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
+                      >
+                        {isRepayingThis && !repayHash ? (
+                          <>
+                            <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                            Confirm…
+                          </>
+                        ) : isRepayingThis && isRepayConfirming ? (
+                          <>
+                            <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                            Confirming…
+                          </>
+                        ) : isRepayingThis && isRepayConfirmed ? (
+                          <>
+                            <Check className="h-3.5 w-3.5" /> Repaid
+                          </>
+                        ) : (
+                          'Repay'
+                        )}
+                      </button>
+                      {outstandingVal !== undefined && (
+                        <button
+                          onClick={() => {
+                            // Deliberately overpay by a small buffer over the live
+                            // outstanding balance — outstandingBalance() ticks up
+                            // slightly between this read and when the tx actually
+                            // mines, and the contract caps what it applies and
+                            // refunds the exact excess in the same transaction, so
+                            // this reliably closes the loan in one click.
+                            const full = outstandingVal + parseEther('0.0001');
+                            setRepayAmountInputs((prev) => ({ ...prev, [idKey]: formatEther(full) }));
+                            void repayLoan(terms.loanContract, id, full);
+                          }}
+                          disabled={isRepayingThis && (isRepayPending || isRepayConfirming || !repayHash)}
+                          className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                        >
+                          Repay in full
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-700 mt-1.5">
+                      Partial payments are fine — pay what you can now and the rest later, before the deadline.
+                    </p>
+
+                    {isRepayingThis && repayHash && (
+                      <div className="mt-2">
+                        <a
+                          href={`https://sepolia.etherscan.io/tx/${repayHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[10px] font-mono text-blue-400"
+                        >
+                          {repayHash.slice(0, 18)}… ↗
+                        </a>
+                      </div>
+                    )}
+                    {repayError && repayErrorLoanId === id && (
+                      <p className="mt-2 text-[11px] text-red-400 font-mono break-all">{repayError}</p>
+                    )}
+                  </div>
+                )}
 
                 {/* Etherscan links */}
                 <div className="flex flex-wrap items-center gap-4 pt-3 border-t border-slate-800/60 text-[11px]">
