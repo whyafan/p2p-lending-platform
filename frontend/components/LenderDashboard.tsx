@@ -16,6 +16,16 @@ import { inferRiskTierFromBps, RISK_TIER_CONFIG, BASE_APR } from '../lib/loan-te
 import { formatUsd, formatPercent } from '../lib/format';
 import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
 import { LoanSafetyPanel } from './LoanSafetyPanel';
+import type { FeatureContribution } from '../lib/risk-explainer';
+import type { RiskTier } from '../lib/loan-terms';
+
+type StoredAssessment = {
+  tier: RiskTier;
+  overallScore: number;
+  contributions: FeatureContribution[];
+  source?: string | null;
+  personaId?: string | null;
+};
 import { ClipboardList, TrendingUp, Check, Hexagon, AlertTriangle } from 'lucide-react';
 
 const FUNDING_WINDOW_SECS = 7 * 24 * 60 * 60;
@@ -326,6 +336,27 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     });
     return map;
   }, [delinqLiqContracts, delinqLiqResults]);
+
+  // Borrower risk explanations, persisted at loan creation. Fetched in one batch
+  // keyed by loan contract address; loans created before this feature existed
+  // simply have no row and the panel says so.
+  const [assessments, setAssessments] = useState<Record<string, StoredAssessment>>({});
+  const addressKey = useMemo(
+    () => loanContractAddresses.filter(Boolean).join(','),
+    [loanContractAddresses],
+  );
+
+  useEffect(() => {
+    if (!addressKey) return;
+    let cancelled = false;
+    fetch(`/api/loans/risk?loanContracts=${addressKey}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d?.assessments) setAssessments(d.assessments);
+      })
+      .catch(() => { /* non-critical: panel degrades to terms-only */ });
+    return () => { cancelled = true; };
+  }, [addressKey]);
 
   async function refetchAll() {
     await Promise.all([
@@ -712,6 +743,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         currentLtv={currentLtv}
                         collateralUsd={collateralUsd}
                         principalUsd={principalUsd}
+                        assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
                       />
                     </div>
 
@@ -942,6 +974,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         collateralUsd={collateralUsd}
                         principalUsd={principalUsd}
                         isLiquidatable={canLiquidate}
+                        assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
                       />
                     </div>
 

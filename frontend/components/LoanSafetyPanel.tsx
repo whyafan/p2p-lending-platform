@@ -17,6 +17,7 @@
 
 import { useState } from 'react';
 import type { RiskTier } from '../lib/loan-terms';
+import type { FeatureContribution } from '../lib/risk-explainer';
 import { RISK_TIER_CONFIG, BASE_APR } from '../lib/loan-terms';
 import { formatPercent, formatUsd } from '../lib/format';
 import { ShieldCheck, ChevronDown, AlertTriangle } from 'lucide-react';
@@ -33,6 +34,14 @@ type Props = {
   principalUsd: number | null;
   /** Contract's own view — the authoritative gate. */
   isLiquidatable?: boolean;
+  /** Persisted borrower assessment, when one was saved at request time. */
+  assessment?: {
+    tier: RiskTier;
+    overallScore: number;
+    contributions: FeatureContribution[];
+    source?: string | null;
+    personaId?: string | null;
+  } | null;
 };
 
 export function LoanSafetyPanel({
@@ -45,6 +54,7 @@ export function LoanSafetyPanel({
   collateralUsd,
   principalUsd,
   isLiquidatable,
+  assessment,
 }: Props) {
   const [open, setOpen] = useState(false);
 
@@ -184,11 +194,67 @@ export function LoanSafetyPanel({
             </ul>
           </div>
 
-          <p className="text-[10px] text-slate-700 leading-relaxed">
-            Tier is derived from the loan&apos;s on-chain terms. The borrower&apos;s feature-level risk
-            breakdown is generated at request time and isn&apos;t stored on-chain yet, so it can&apos;t be
-            shown here.
-          </p>
+          {/* Feature-level reasoning, when the borrower's assessment was captured */}
+          {assessment && assessment.contributions?.length > 0 ? (
+            <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-2">
+              <div className="flex items-baseline justify-between gap-2">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                  How the score was reached
+                </p>
+                <p className="text-[10px] font-mono text-slate-500">
+                  score <span className="text-slate-300 font-bold">{assessment.overallScore.toFixed(3)}</span>
+                  <span className="text-slate-700"> / 1.000</span>
+                </p>
+              </div>
+
+              <div className="space-y-1">
+                {[...assessment.contributions]
+                  .sort((a, b) => b.weight - a.weight)
+                  .map((c) => {
+                    // score is -1 (worst) .. +1 (best); render as a centred bar
+                    const pct = Math.min(100, Math.abs(c.score) * 50);
+                    const good = c.score >= 0;
+                    return (
+                      <div key={c.feature} className="grid grid-cols-[1fr_auto_64px] items-center gap-2">
+                        <div className="min-w-0">
+                          <p className="text-[11px] text-slate-300 truncate" title={c.description}>
+                            {c.feature}
+                          </p>
+                          <p className="text-[10px] text-slate-600 truncate">{c.value}</p>
+                        </div>
+                        <span className="text-[10px] font-mono text-slate-600">
+                          {formatPercent(c.weight)}
+                        </span>
+                        <div className="relative h-1.5 w-16 rounded-full bg-slate-800 overflow-hidden">
+                          <div className="absolute left-1/2 top-0 h-full w-px bg-slate-700" />
+                          <div
+                            className={`absolute top-0 h-full ${good ? 'bg-emerald-500' : 'bg-red-500'}`}
+                            style={
+                              good
+                                ? { left: '50%', width: `${pct}%` }
+                                : { right: '50%', width: `${pct}%` }
+                            }
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+
+              <p className="text-[10px] text-slate-700 leading-relaxed">
+                Weight = how much each signal counts toward the score (all sum to 100%). Green pushes
+                toward Tier A, red toward Tier C.
+                {assessment.source === 'persona' && (
+                  <> Assessed from a <span className="text-amber-500/80">demo persona</span>, not a real wallet.</>
+                )}
+              </p>
+            </div>
+          ) : (
+            <p className="text-[10px] text-slate-700 leading-relaxed">
+              Tier is derived from this loan&apos;s on-chain terms. No feature-level assessment was
+              captured for it — loans created before this was added won&apos;t have one.
+            </p>
+          )}
         </div>
       )}
     </div>

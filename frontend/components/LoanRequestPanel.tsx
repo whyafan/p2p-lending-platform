@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect } from 'react';
 import { useWriteContract, useWaitForTransactionReceipt, useAccount, useBalance, useSwitchChain } from 'wagmi';
+import { decodeEventLog } from 'viem';
 import { parseEther } from 'viem';
 import { sepolia, hardhat } from 'wagmi/chains';
 import { BORROWER_PERSONAS, type BorrowerPersona } from '../lib/borrower-personas';
@@ -47,6 +48,17 @@ const LOAN_FACTORY_ABI = [
       { name: 'loanContract', type: 'address' },
     ],
     stateMutability: 'payable',
+  },
+  {
+    name: 'LoanCreated',
+    type: 'event',
+    inputs: [
+      { name: 'loanId', type: 'uint256', indexed: true },
+      { name: 'borrower', type: 'address', indexed: true },
+      { name: 'loanContract', type: 'address', indexed: true },
+      { name: 'principalAmount', type: 'uint256', indexed: false },
+      { name: 'collateralAmount', type: 'uint256', indexed: false },
+    ],
   },
 ] as const;
 
@@ -429,9 +441,56 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
 
   const { writeContractAsync, isPending: isTxPending } = useWriteContract();
 
-  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
+  const { data: txReceipt, isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
     hash: submittedHash,
   });
+
+  // Persist the risk explanation once the loan contract actually exists.
+  //
+  // The score is computed in this component and would otherwise die on unmount,
+  // leaving lenders with a bare A/B/C badge. It can't be saved at submit time
+  // because the Loan address only comes into existence when the transaction
+  // mines, so we decode it out of the LoanCreated event in the receipt.
+  // Best-effort: a failure here must never disrupt the borrower's flow — the
+  // loan itself is already safely on-chain.
+  const [riskSaved, setRiskSaved] = useState(false);
+  useEffect(() => {
+    if (!isConfirmed || !txReceipt || !riskExpl || riskSaved) return;
+
+    let loanContract: string | undefined;
+    for (const log of txReceipt.logs) {
+      try {
+        const decoded = decodeEventLog({
+          abi: LOAN_FACTORY_ABI,
+          data: log.data,
+          topics: log.topics,
+        });
+        if (decoded.eventName === 'LoanCreated') {
+          loanContract = (decoded.args as { loanContract: string }).loanContract;
+          break;
+        }
+      } catch {
+        // Not a LoanCreated log (the vault emits its own) — keep looking.
+      }
+    }
+    if (!loanContract) return;
+
+    setRiskSaved(true);
+    void fetch('/api/loans/risk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        loanContract,
+        chainId,
+        borrowerWallet: address,
+        tier: riskExpl.tier,
+        overallScore: riskExpl.overallScore,
+        contributions: riskExpl.contributions,
+        source: evalMode === 'persona' ? 'persona' : 'wallet',
+        personaId: selectedPersona?.id ?? null,
+      }),
+    }).catch((err) => console.error('[risk-persist]', err));
+  }, [isConfirmed, txReceipt, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona]);
 
   const factoryAddress =
     networkMode === 'testnet'
@@ -588,6 +647,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     setRiskExpl(null);
     setTxError(null);
     setSubmittedHash(undefined);
+    setRiskSaved(false);
     onTierChange?.(null, null);
     onPersonaChange?.(null);
   }

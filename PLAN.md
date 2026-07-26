@@ -221,7 +221,7 @@ Something independent of the test findings, so a bug discovered in testing doesn
 
 ### Kept intentionally low priority
 
-- **Persist the borrower's risk explanation for lenders** — the tier badge and the safety panel are live, but the *feature-level* breakdown (the 8 weighted signals behind the score) is computed in the borrower's browser at request time and never stored, so lenders can't see it. The lender-journey doc asks for an "ML explainability summary". Would need a Supabase table keyed by loan ID, written at loan creation. Not started.
+- _(nothing parked here right now)_
 
 ### Optional polish
 
@@ -272,6 +272,19 @@ Push to any of those branches → that branch's URL rebuilds automatically. No C
 ### Known gap to check before team testing
 
 If Supabase has "Confirm email" enabled, confirmation links point at Supabase's configured Site URL (likely still `localhost:3000`), which would break signup for anyone not on the dev machine. Either disable email confirmation (Supabase → Authentication → Providers → Email) or add the deployed URLs to Supabase's Site URL / Redirect URLs.
+
+---
+
+## Lender-facing ML explainability (2026-07-26)
+
+The borrower's 8-feature risk score was computed in the browser and discarded on unmount — only the tier survived, baked into the on-chain terms. Lenders therefore saw a letter grade with no reasoning, which is precisely the "ledger transparency is not decision transparency" gap the literature review calls out. Now persisted and surfaced.
+
+- `supabase/migrations/003_loan_risk_assessments.sql` — **must be run once in the Supabase SQL editor.** Until then saving fails silently (by design: it never disrupts the borrower's flow) and lenders see "no assessment captured".
+- Keyed by **Loan contract address**, not the numeric loan ID — globally unique across factory redeploys, and it's what the lender dashboard already holds.
+- RLS: readable by **any signed-in user** (a lender must be able to read someone else's loan — the row holds no PII, only signals that already determine the public on-chain terms), insertable only by the loan's creator, and **immutable** afterwards so a borrower can't rewrite an explanation a lender already funded against.
+- `app/api/loans/risk/route.ts` — POST to save, GET to batch-fetch by address.
+- `LoanRequestPanel` saves **after the receipt confirms**, decoding the `Loan` address from the `LoanCreated` event: the address doesn't exist at submit time. Best-effort — a failure here never blocks the borrower, since the loan is already on-chain.
+- `LoanSafetyPanel` renders the contributions sorted by weight, each with a centred bar (green toward Tier A, red toward Tier C), the weight %, and the overall score. Loans created before this existed say so plainly rather than showing a blank.
 
 ---
 
