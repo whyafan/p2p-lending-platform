@@ -204,15 +204,30 @@ Full stack, contract through UI through redeploy:
 
 ## Deployment (2026-07-26)
 
-The frontend is deployed on **Vercel** so the team can test against the same live Sepolia contracts without each running `npm run dev`.
+The frontend is deployed on **Vercel**, connected to the GitHub repo (`whyafan/p2p-lending-platform`) so **every push auto-deploys**. Each team branch gets its own stable URL, so everyone can test their own work in isolation while sharing the same Sepolia contracts.
 
-- **Live URL: https://frontend-gold-chi-89.vercel.app** — this is the public production URL. Use this one.
-- `https://nexusfi-lending.vercel.app` is an alias pointing at the same deployment, but it currently sits behind Vercel's default deployment protection (SSO) and will 302 to a Vercel login. To make it usable, turn off Deployment Protection in the Vercel dashboard (Project → Settings → Deployment Protection). Until then, share the URL above.
-- Vercel project: `afan1/frontend`, root directory `frontend/`, framework auto-detected as Next.js. Linked via `npx vercel link`; deployed via `npx vercel --prod`.
-- All 15 env vars from `frontend/.env.local` are set in Vercel's Production environment (Supabase URL/anon/service-role, Sepolia RPC + the three contract addresses, WalletConnect project ID, the four Didit KYC vars, and `ALLOW_DEMO_KYC=1`). Verified the redeployed LoanFactory address is baked into the production client bundle.
-- **Not deployed:** the FastAPI credit-scoring backend (`backend/`). `/api/credit/score` falls back to the client-side rule-based scorer when it's unreachable, so this is not a blocker — the risk scoring still works, just via the rule-based path.
-- **Redeploying after a code change:** `cd frontend && npx vercel --prod`. The project was created via CLI, so it is **not** wired to auto-deploy on `git push` — connect the GitHub repo in the Vercel dashboard if that's wanted.
-- **Known gap to check before team testing:** if Supabase has "Confirm email" enabled, confirmation links point at Supabase's configured Site URL (likely still `localhost:3000`), which would break signup for anyone not on the dev machine. Either disable email confirmation (Supabase → Authentication → Providers → Email) or add the Vercel URL to Supabase's Site URL / Redirect URLs.
+| Branch | URL | Vercel environment |
+|---|---|---|
+| `main` | https://nexusfi-lending.vercel.app (also https://frontend-gold-chi-89.vercel.app) | Production |
+| `afan` | https://nexusfi-afan.vercel.app | Preview |
+| `siddharth` | https://nexusfi-siddharth.vercel.app | Preview |
+| `atharva` | https://nexusfi-atharva.vercel.app | Preview |
+
+Push to any of those branches → that branch's URL rebuilds automatically. No CLI step needed.
+
+**Important: separate frontends, shared backend.** All four deployments point at the *same* Sepolia contracts and the *same* Supabase project. That's deliberate — it's what lets one person borrow and another lend and actually see each other's loans. It also means test data is shared across all four URLs, and any contract redeploy affects all of them at once.
+
+### Vercel project config
+
+- Project `afan1/frontend`, **Root Directory `frontend`** (required — the repo is a monorepo; without this, git builds clone the repo root and fail to find the Next.js app). Production Branch: `main`.
+- All 15 env vars from `frontend/.env.local` are set in **both** Production and Preview environments (Supabase URL/anon/service-role, Sepolia RPC + the three contract addresses, WalletConnect project ID, the four Didit KYC vars, `ALLOW_DEMO_KYC=1`). Preview needs its own copy or branch deployments build with no config and break at runtime.
+- **Deployment Protection is disabled.** By default Vercel puts preview deployments behind an SSO login, which would have blocked teammates (a Hobby team can't add members). Disabling it makes all four URLs publicly reachable — fine for a testnet demo app with no real funds, but worth knowing these URLs are open to anyone who has the link.
+- **Not deployed:** the FastAPI credit-scoring backend (`backend/`). `/api/credit/score` falls back to the client-side rule-based scorer when unreachable, so risk scoring still works — just via the rule-based path.
+- Manual deploy (rarely needed now): `cd frontend && npx vercel --prod`.
+
+### Known gap to check before team testing
+
+If Supabase has "Confirm email" enabled, confirmation links point at Supabase's configured Site URL (likely still `localhost:3000`), which would break signup for anyone not on the dev machine. Either disable email confirmation (Supabase → Authentication → Providers → Email) or add the deployed URLs to Supabase's Site URL / Redirect URLs.
 
 ---
 
