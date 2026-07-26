@@ -120,6 +120,36 @@ This is where **BUG-VIS** (loans not always visible between accounts) is expecte
 
 ---
 
+## Gotchas worth remembering
+
+Things that already cost time once. Not test steps — just don't relearn them the hard way.
+
+**Redeploying contracts invalidates all existing loans.** Addresses change, so anything created
+against the old factory silently disappears from the UI. If loans vanish mid-session, check whether
+a redeploy happened rather than hunting a frontend bug.
+
+**Verifying contracts on a block explorer:**
+```bash
+cd contracts
+npx hardhat compile --build-profile production      # step 1 is not optional
+npx hardhat verify --build-profile production --network sepolia <address> [ctorArgs...]
+# LoanFactory takes three args: <vault> <priceFeed> true
+```
+- `--build-profile production` is **required**. Ignition deploys with the production profile
+  (optimizer on, 200 runs); `verify` defaults to the profile *without* it, so you get
+  `bytecode does not match any of your local contracts`.
+- Recompiling with that profile first is also required — stale default-profile artifacts throw the
+  same error even when the flag is passed, which makes it look like the flag didn't work.
+- Etherscan is configured but **disabled** until `ETHERSCAN_API_KEY` is in `contracts/.env`
+  (free key at <https://etherscan.io/apis>). Blockscout and Sourcify need no key and already work.
+
+**Only the deployer wallet can't be assumed for demo actions.** `setPrice` is permissionless
+(any wallet), but `fastForward` must come from that specific loan's borrower or lender.
+
+**Interest rounds to 0 on tiny loans** (< ~3650 wei). Use ≥ 0.01 ETH or the numbers look broken.
+
+---
+
 ## Findings log
 
 | Date | Track/step | What happened | Expected | Severity |
