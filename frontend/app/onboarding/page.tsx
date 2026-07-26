@@ -12,7 +12,11 @@ import { Wallet, Check } from 'lucide-react';
 type Step = 'account' | 'role' | 'wallet' | 'kyc' | 'ready';
 
 const DIDIT_CONFIGURED = process.env.NEXT_PUBLIC_DIDIT_CONFIGURED === 'true';
-const ALLOW_DEMO = process.env.NODE_ENV === 'development';
+// Mirrors the server's ALLOW_DEMO_KYC. This used to be `NODE_ENV === 'development'`,
+// which meant the bypass button could never render on a deployed build — the
+// /api/kyc/demo-approve endpoint was live but unreachable from the UI, so KYC was
+// unskippable on Vercel. NODE_ENV is not a deployment-intent flag; use an explicit one.
+const ALLOW_DEMO = process.env.NEXT_PUBLIC_ALLOW_DEMO_KYC === '1';
 
 const ROLE_OPTIONS = [
   {
@@ -450,9 +454,23 @@ export default function OnboardingPage() {
                   )}
 
                   {DIDIT_CONFIGURED && ALLOW_DEMO && (
-                    <button type="button" onClick={() => void demoApproveKyc()} className="w-full text-xs font-bold text-slate-600 hover:text-slate-400 transition-colors py-1">
-                      Skip verification (dev bypass)
-                    </button>
+                    <>
+                      <div className="flex items-center gap-3">
+                        <div className="h-px flex-1 bg-slate-800" />
+                        <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">or</span>
+                        <div className="h-px flex-1 bg-slate-800" />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void demoApproveKyc()}
+                        className="h-11 w-full rounded-xl border border-amber-500/40 bg-amber-500/10 text-sm font-black text-amber-400 hover:bg-amber-500/20 transition-colors"
+                      >
+                        Skip verification (testing bypass)
+                      </button>
+                      <p className="text-[10px] text-slate-600 text-center">
+                        Marks you verified instantly so you can test without completing real ID checks.
+                      </p>
+                    </>
                   )}
                 </div>
               )}

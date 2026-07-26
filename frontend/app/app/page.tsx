@@ -361,13 +361,15 @@ export default function AppPage() {
               {!canBorrowRole && <Lock className="h-3 w-3 mr-1 inline" />}Borrow
             </button>
             <button
-              onClick={() => canLend && setActiveView('lender')}
-              className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${
+              onClick={() => (canLend ? setActiveView('lender') : void activateLending())}
+              disabled={isActivatingRole}
+              title={canLend ? undefined : 'Click to enable lending on this account'}
+              className={`px-5 py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-50 ${
                 activeView === 'lender'
                   ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
                   : canLend
                   ? 'text-slate-400 hover:text-white'
-                  : 'text-slate-700 cursor-not-allowed'
+                  : 'text-slate-600 hover:text-blue-400'
               }`}
             >
               {!canLend && <Lock className="h-3 w-3 mr-1 inline" />}Lend
@@ -383,6 +385,14 @@ export default function AppPage() {
               {isActivatingRole ? '…' : `+ Activate ${userRole === 'borrower' ? 'lending' : 'borrowing'}`}
             </button>
           )}
+
+          <Link
+            href="/settings#role"
+            className="text-xs font-bold text-slate-600 hover:text-white transition-colors"
+            title="Switch between Borrow, Lend or Both"
+          >
+            Change role
+          </Link>
 
           {/* ETH Price quick-view */}
           {ethPrice > 0 && (

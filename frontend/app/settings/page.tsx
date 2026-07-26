@@ -487,7 +487,7 @@ export default function SettingsPage() {
           </div>
 
           {/* ── Role Management ── */}
-          <div className="rounded-2xl border border-slate-800 bg-[#111827] p-6">
+          <div id="role" className="rounded-2xl border border-slate-800 bg-[#111827] p-6 scroll-mt-6">
             <div className="mb-5">
               <h2 className="text-sm font-black text-white uppercase tracking-widest">Account Role</h2>
               <p className="text-xs text-slate-500 mt-0.5">Choose how you use NexusFi. You can change this any time.</p>
