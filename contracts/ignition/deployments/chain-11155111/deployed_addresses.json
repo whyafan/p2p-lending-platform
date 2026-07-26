@@ -1,5 +1,5 @@
 {
-  "NexusFiMilestone1#CollateralVault": "0xF5903a5EF8A9226Df08b4079C72AACa38117c153",
-  "NexusFiMilestone1#MockPriceFeed": "0x06bfefD8ba2EdAC5157aE929a8E595aB90a33495",
-  "NexusFiMilestone1#LoanFactory": "0x3C4083D4C3E091aCf44bc7E13111fa219F5C4500"
+  "NexusFiMilestone1#CollateralVault": "0x0C0B2aa539Cbe0c3c93559508c46d0934fAbbf1f",
+  "NexusFiMilestone1#MockPriceFeed": "0x39d857c414585C5aAef96Ca82Ea5C5F671F381Cb",
+  "NexusFiMilestone1#LoanFactory": "0xf34505b3939374f8Cd71BE5D21c424c642c210d0"
 }

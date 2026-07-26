@@ -8,23 +8,22 @@ contract MockPriceFeed {
     uint256 public ethUsdPrice;
     address public owner;
 
-    event PriceUpdated(uint256 oldPrice, uint256 newPrice);
+    event PriceUpdated(uint256 oldPrice, uint256 newPrice, address indexed setBy);
 
     constructor(uint256 initialPrice_) {
         ethUsdPrice = initialPrice_;
         owner = msg.sender;
     }
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "MockPriceFeed: not owner");
-        _;
-    }
-
     /// @notice Set mock ETH/USD price (whole dollars, e.g. 2000 for $2,000).
-    function setPrice(uint256 newPrice) external onlyOwner {
+    /// @dev Deliberately permissionless. This is a *mock* oracle whose entire
+    ///      purpose is letting anyone demo a price crash on testnet — gating it
+    ///      to the deployer would mean only one teammate could ever run the
+    ///      liquidation demo. Never ship this contract to a real network.
+    function setPrice(uint256 newPrice) external {
         uint256 old = ethUsdPrice;
         ethUsdPrice = newPrice;
-        emit PriceUpdated(old, newPrice);
+        emit PriceUpdated(old, newPrice, msg.sender);
     }
 
     /// @notice Returns the current mock ETH/USD price.

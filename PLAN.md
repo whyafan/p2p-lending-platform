@@ -77,11 +77,11 @@ closes and collateral releases to borrower               to the lender. Blocked 
 
 Every step (create, fund, repay — partial or full, cancel, liquidate, set mock price) emits a transaction and the UI shows a live `sepolia.etherscan.io/tx/{hash}` link. Contract-level correctness (partial repayment sequences, overpayment refunds, interest accrual matching the fixed-duration formula at the deadline boundary and staying flat past the liquidation cap, liquidate() reverting/succeeding at the right times) is covered by 10 new tests in `contracts/test/LoanLifecycle.ts`, all passing alongside the original `NexusFiMilestone1.ts` suite (12/12 total). Full manual click-through of the redeployed contracts via the live UI has not yet been done in this session — only the automated test suite and the deploy transaction itself have been verified.
 
-Deployed contracts (redeployed 2026-07-26 — `LoanFactory`'s constructor now takes the price feed, so all three addresses changed again; earlier addresses are abandoned):
+Deployed contracts (redeployed 2026-07-26, twice — first for the price feed, then for the demo controls; earlier addresses are abandoned):
 
-- LoanFactory: `0x3C4083D4C3E091aCf44bc7E13111fa219F5C4500`
-- CollateralVault: `0xF5903a5EF8A9226Df08b4079C72AACa38117c153`
-- MockPriceFeed: `0x06bfefD8ba2EdAC5157aE929a8E595aB90a33495`
+- LoanFactory: `0xf34505b3939374f8Cd71BE5D21c424c642c210d0`
+- CollateralVault: `0x0C0B2aa539Cbe0c3c93559508c46d0934fAbbf1f`
+- MockPriceFeed: `0x39d857c414585C5aAef96Ca82Ea5C5F671F381Cb`
 
 All three are populated in `frontend/.env.local`.
 
@@ -241,6 +241,19 @@ Push to any of those branches → that branch's URL rebuilds automatically. No C
 ### Known gap to check before team testing
 
 If Supabase has "Confirm email" enabled, confirmation links point at Supabase's configured Site URL (likely still `localhost:3000`), which would break signup for anyone not on the dev machine. Either disable email confirmation (Supabase → Authentication → Providers → Email) or add the deployed URLs to Supabase's Site URL / Redirect URLs.
+
+---
+
+## Demo controls — forcing both triggers on demand (2026-07-26)
+
+Neither liquidation trigger can normally be exercised on demand: one needs a real market crash, the other needs real days to pass. **`/demo`** (a deliberately unlinked route — kept off the dashboards so it doesn't clutter them) fakes both:
+
+- **Price** → writes to `MockPriceFeed.setPrice`. Presets (−25%, −50%, crash to $500, reset) plus a custom field. `setPrice` is now **permissionless**: gating it to the deployer meant only one teammate could ever run the demo. It's a mock oracle on testnet; never ship it to a real network.
+- **Time** → `Loan.fastForward(seconds)`. `block.timestamp` can't be moved on a live chain, so this rewinds the *loan's own* timestamps instead, which is equivalent. Buttons for +1 day / to deadline / past grace. Affects the funding window while `Requested` and the deadline, grace period and interest accrual once `Funded`.
+
+Guards: `fastForward` requires the factory's `demoMode` (a deploy-time flag — a real deployment passes `false`), only the loan's own borrower or lender can call it (so nobody can shove a stranger's position into liquidation), and it reverts on closed loans.
+
+`demoMode` is read from the factory via a `try/catch` view rather than stored per-loan — adding a 12th constructor parameter blew the EVM stack limit ("stack too deep"), and reading it keeps a single source of truth.
 
 ---
 

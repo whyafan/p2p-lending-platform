@@ -30,7 +30,7 @@ describe("NexusFi Milestone 1", async function () {
 
     const loanFactory = await viem.deployContract(
       "LoanFactory",
-      [collateralVault.address, mockPriceFeed.address],
+      [collateralVault.address, mockPriceFeed.address, true],
       { client: { wallet: deployer, public: publicClient } },
     );
 

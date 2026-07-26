@@ -152,4 +152,45 @@ export const LOAN_ABI = [
     outputs: [{ name: '', type: 'uint256' }],
     stateMutability: 'view',
   },
+  // --- demo helpers (only usable when the factory has demoMode = true) ---
+  {
+    name: 'fastForward',
+    type: 'function',
+    inputs: [{ name: 'secondsToSkip', type: 'uint256' }],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+  {
+    name: 'demoMode',
+    type: 'function',
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'view',
+  },
+  {
+    name: 'borrower',
+    type: 'function',
+    inputs: [],
+    outputs: [{ name: '', type: 'address' }],
+    stateMutability: 'view',
+  },
+] as const;
+
+/// Mock ETH/USD oracle. setPrice is deliberately permissionless on testnet so
+/// any teammate can run the price-crash demo.
+export const PRICE_FEED_ABI = [
+  {
+    name: 'latestPrice',
+    type: 'function',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
+    name: 'setPrice',
+    type: 'function',
+    inputs: [{ name: 'newPrice', type: 'uint256' }],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
 ] as const;

@@ -28,10 +28,15 @@ All four URLs share the **same Sepolia contracts and the same Supabase database*
 - [ ] Both passed KYC via the demo bypass (`ALLOW_DEMO_KYC=1` is on — no real ID needed)
 - [ ] Network toggle set to **testnet** on both
 
-**Deployed contracts under test** (redeployed 2026-07-26):
-- LoanFactory `0x3C4083D4C3E091aCf44bc7E13111fa219F5C4500`
-- CollateralVault `0xF5903a5EF8A9226Df08b4079C72AACa38117c153`
-- MockPriceFeed `0x06bfefD8ba2EdAC5157aE929a8E595aB90a33495`
+**Deployed contracts under test** (redeployed 2026-07-26 with demo controls):
+- LoanFactory `0xf34505b3939374f8Cd71BE5D21c424c642c210d0`
+- CollateralVault `0x0C0B2aa539Cbe0c3c93559508c46d0934fAbbf1f`
+- MockPriceFeed `0x39d857c414585C5aAef96Ca82Ea5C5F671F381Cb`
+
+> **Demo controls: `/demo`** (e.g. <https://nexusfi-afan.vercel.app/demo>) — not linked from the nav.
+> Set any ETH price, and skip a loan's clock past its deadline/grace period. This makes Track B
+> runnable in minutes instead of 3 days, and Track D instant. Time-skips must be sent by that
+> loan's own borrower or lender; the price control works from any wallet.
 
 ---
 
@@ -59,7 +64,12 @@ Any duration works here; nothing depends on deadlines. Use small amounts (≥0.0
 
 ## Track B — Delinquency + liquidation (multi-day)
 
-Uses the **1-day** duration option → full arc is ~3 days (1d deadline + 2d grace period).
+Two ways to run this:
+- **Fast (recommended for a first pass):** use `/demo` → "Skip time" to jump a loan past its
+  deadline and grace period instantly. Verifies the exact same on-chain gates.
+- **Real-time (do once, for confidence):** use the **1-day** duration and wait the real ~3 days
+  (1d deadline + 2d grace). Proves nothing depends on the demo helper.
+
 Do this on its own loan, separate from Track A. Note funding time — everything is relative to it.
 
 **Funded at:** `____________`  → due `+24h` → liquidatable `+72h`

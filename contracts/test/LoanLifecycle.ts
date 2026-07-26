@@ -52,7 +52,7 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
 
     const loanFactory = await viem.deployContract(
       "LoanFactory",
-      [collateralVault.address, mockPriceFeed.address],
+      [collateralVault.address, mockPriceFeed.address, true],
       { client: { wallet: deployer, public: publicClient } },
     );
 
@@ -401,5 +401,95 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
     assert.equal(await loanAsBorrower.read.currentLtvBps(), 0n);
     assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), false);
     assert.equal(await loanAsBorrower.read.isLiquidatable(), false);
+  });
+  // ── Demo helpers: force both triggers without waiting or a real market ──
+
+  it("fastForward() pushes a loan past the deadline and grace period on demand", async function () {
+    const { loanAsLender, loanAsBorrower } = await deployFundedLoan();
+
+    assert.equal(await loanAsBorrower.read.demoMode(), true);
+    assert.equal(await loanAsBorrower.read.isDelinquentLiquidatable(), false);
+
+    // Skip the full duration + grace + a margin, in one call.
+    const skip = durationDays * DAY + GRACE_PERIOD + 60n;
+    await loanAsBorrower.write.fastForward([skip], { account: borrower.account });
+
+    assert.equal(await loanAsBorrower.read.isDelinquent(), true);
+    assert.equal(await loanAsBorrower.read.isDelinquentLiquidatable(), true);
+
+    // ...and the lender can now actually liquidate, with no real time elapsed.
+    await viem.assertions.emit(
+      loanAsLender.write.liquidate({ account: lender.account }),
+      loanAsLender,
+      "LoanLiquidated",
+    );
+    assert.equal(await loanAsBorrower.read.status(), 4);
+  });
+
+  it("fastForward() lets the lender skip only partway, leaving the loan protected", async function () {
+    const { loanAsLender, loanAsBorrower } = await deployFundedLoan();
+
+    // Past the deadline but still inside the grace period.
+    await loanAsLender.write.fastForward([durationDays * DAY + DAY], { account: lender.account });
+
+    assert.equal(await loanAsBorrower.read.isDelinquent(), true);
+    assert.equal(await loanAsBorrower.read.isDelinquentLiquidatable(), false);
+    await viem.assertions.revertWith(
+      loanAsLender.write.liquidate({ account: lender.account }),
+      "Loan: not liquidatable",
+    );
+  });
+
+  it("fastForward() expires the funding window while a loan is still Requested", async function () {
+    const { loanFactory } = await deployFundedLoan();
+
+    // Second, unfunded loan on the same factory.
+    await loanFactory.write.createLoan(
+      [principalAmount, durationDays, interestBps, maxLtvBps, liquidationBufferBps],
+      { account: borrower.account, value: collateralAmount },
+    );
+    const terms = await loanFactory.read.loans([1n]);
+    const addr = getStructValue<`0x${string}`>(terms, 0, "loanContract");
+    const loan = await viem.getContractAt("Loan", addr, {
+      client: { wallet: borrower, public: publicClient },
+    });
+
+    await loan.write.fastForward([8n * DAY], { account: borrower.account }); // window is 7 days
+
+    const asLender = await viem.getContractAt("Loan", addr, {
+      client: { wallet: lender, public: publicClient },
+    });
+    await viem.assertions.revertWith(
+      asLender.write.fund({ account: lender.account, value: principalAmount }),
+      "Loan: funding window has expired",
+    );
+  });
+
+  it("fastForward() rejects non-participants and closed loans", async function () {
+    const { loanAsBorrower } = await deployFundedLoan();
+
+    // deployer is neither borrower nor lender on this loan
+    await viem.assertions.revertWith(
+      loanAsBorrower.write.fastForward([DAY], { account: deployer.account }),
+      "Loan: not a participant",
+    );
+
+    const owed = await loanAsBorrower.read.outstandingBalance();
+    await loanAsBorrower.write.repay({ account: borrower.account, value: owed + parseEther("0.1") });
+
+    await viem.assertions.revertWith(
+      loanAsBorrower.write.fastForward([DAY], { account: borrower.account }),
+      "Loan: loan is closed",
+    );
+  });
+
+  it("anyone can move the mock oracle price (so any teammate can run the demo)", async function () {
+    const { mockPriceFeed, loanAsBorrower } = await deployFundedLoan();
+
+    // borrower is not the feed's deployer, yet can still crash the price
+    await mockPriceFeed.write.setPrice([1_000n], { account: borrower.account });
+
+    assert.equal(await mockPriceFeed.read.latestPrice(), 1_000n);
+    assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), true);
   });
 });

@@ -10,6 +10,10 @@ interface ICollateralVault {
     function liquidateCollateral(uint256 loanId, address payable recipient) external;
 }
 
+interface ILoanFactory {
+    function demoMode() external view returns (bool);
+}
+
 interface IPriceFeed {
     /// @return ETH/USD price in whole dollars (e.g. 2000 for $2,000).
     function latestPrice() external view returns (uint256);
@@ -43,7 +47,7 @@ contract Loan is ReentrancyGuard {
     uint256 public immutable interestBps;
     uint256 public immutable maxLtvBps;
     uint256 public immutable liquidationBufferBps;
-    uint256 public immutable requestedAt;
+    uint256 public requestedAt;
     uint256 public fundedAt;
 
     /// Oracle used to value collateral in USD. May be address(0), in which case
@@ -98,6 +102,7 @@ contract Loan is ReentrancyGuard {
     );
     event LoanCancelled(uint256 indexed loanId);
     event LoanLiquidated(uint256 indexed loanId, address indexed lender);
+    event DemoTimeSkipped(uint256 indexed loanId, address indexed by, uint256 secondsSkipped);
 
     modifier onlyBorrower() {
         require(msg.sender == borrower, "Loan: caller is not borrower");
@@ -212,6 +217,33 @@ contract Loan is ReentrancyGuard {
         emit LoanCancelled(loanId);
     }
 
+    /// @notice Demo-only: rewind this loan's clock so time-gated behaviour can be
+    ///         exercised immediately instead of waiting real days.
+    /// @dev Works by moving the loan's own timestamps *backwards*, which is
+    ///      equivalent to moving "now" forwards — block.timestamp itself cannot be
+    ///      manipulated on a live network. Affects the funding window while the
+    ///      loan is Requested, and the repayment deadline / grace period / interest
+    ///      accrual once it is Funded. Restricted to the loan's own participants so
+    ///      a stranger cannot force someone else's position into liquidation.
+    function fastForward(uint256 secondsToSkip) external {
+        require(demoMode(), "Loan: demo mode disabled");
+        require(secondsToSkip > 0, "Loan: nothing to skip");
+        require(
+            msg.sender == borrower || msg.sender == lender,
+            "Loan: not a participant"
+        );
+
+        if (status == LoanStatus.Requested) {
+            requestedAt = secondsToSkip >= requestedAt ? 0 : requestedAt - secondsToSkip;
+        } else if (status == LoanStatus.Funded) {
+            fundedAt = secondsToSkip >= fundedAt ? 0 : fundedAt - secondsToSkip;
+        } else {
+            revert("Loan: loan is closed");
+        }
+
+        emit DemoTimeSkipped(loanId, msg.sender, secondsToSkip);
+    }
+
     // Real liquidation eligibility. Two independent triggers:
     //   1. Delinquency — past the repayment deadline plus the grace period.
     //   2. Collateral shortfall — oracle-priced LTV at or above the liquidation
@@ -239,6 +271,15 @@ contract Loan is ReentrancyGuard {
             return p;
         } catch {
             return 0;
+        }
+    }
+
+    /// Whether demo helpers (fastForward) are enabled, per the deploying factory.
+    function demoMode() public view returns (bool) {
+        try ILoanFactory(factory).demoMode() returns (bool d) {
+            return d;
+        } catch {
+            return false;
         }
     }
 
