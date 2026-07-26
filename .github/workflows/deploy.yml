@@ -1,0 +1,57 @@
+name: Deploy to Vercel
+
+# Why this exists instead of Vercel's built-in Git integration:
+# Vercel refuses ("BLOCKED") any git-triggered build whose commit author isn't a
+# member of the Vercel team. On the Hobby plan a team has exactly one member, so
+# every teammate's push would be rejected. This workflow deploys using a single
+# account token stored as a repo secret, so builds run as the token owner no
+# matter who pushed — everyone's branch URL updates from their own pushes.
+
+on:
+  push:
+    branches: [main, afan, siddharth, atharva]
+  workflow_dispatch:
+
+# One deploy at a time per branch; a newer push supersedes an in-flight one.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERCEL_ORG_ID: team_UH15sG1ZfJnKiBsc1D1bpQB5
+  VERCEL_PROJECT_ID: prj_3jrQrCmCWjpxag7svSjtk4FIzGx2
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      # NOTE: deploy from the REPO ROOT, not frontend/. The Vercel project has
+      # Root Directory = "frontend"; deploying from inside frontend/ would make
+      # Vercel look for frontend/frontend and fail.
+      - name: Deploy production (main)
+        if: github.ref == 'refs/heads/main'
+        run: vercel deploy --prod --yes --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Deploy preview and point the branch URL at it
+        if: github.ref != 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          branch="${GITHUB_REF_NAME}"
+          url=$(vercel deploy --yes --token="${{ secrets.VERCEL_TOKEN }}")
+          echo "Deployed: $url"
+          # Branch domains are pre-created in the Vercel project as
+          # nexusfi-<branch>.vercel.app. Alias explicitly rather than relying on
+          # Vercel's git-branch matching, which only applies to git-triggered
+          # builds (this is a CLI upload).
+          vercel alias set "$url" "nexusfi-${branch}.vercel.app" \
+            --scope="${VERCEL_ORG_ID}" --token="${{ secrets.VERCEL_TOKEN }}"
+          echo "Live at: https://nexusfi-${branch}.vercel.app"
