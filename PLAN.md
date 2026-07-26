@@ -1,6 +1,6 @@
 # NexusFi P2P Lending Platform — Implementation Plan
 
-> Last updated: 2026-07-26
+> Last updated: 2026-07-26 (evening)
 > Team: K.J. Somaiya School of Engineering final-year project (Afan Khan, Atharva Patil, Viren Rathod, Siddharth Singh). Stack: Next.js 16 + React 19 + wagmi v2 + viem + Solidity 0.8.28 + Hardhat 3 (Ignition) + Supabase + Tailwind v4. Optional FastAPI credit-scoring backend.
 > Official reference docs (in `docs/archive/` unless noted): the literature review (`Literature Review_ P2P Blockchain Lending Platform`), the K.J. Somaiya project brief (`Blockchain_P2P_Lending_Platform.md`), and the borrower/lender user-journey spec. This file is the **living, code-accurate** status tracker — read it before the academic docs, since those describe intent and this describes what actually runs.
 
@@ -51,7 +51,7 @@ This reproduces the project brief's own worked example exactly: $1,400 borrowed 
 
 ---
 
-## ✅ Confirmed working end-to-end on Sepolia (verified 2026-07-25)
+## ✅ Confirmed working end-to-end on Sepolia (contract-level, verified 2026-07-26)
 
 The full loan lifecycle loop, including the new deadline/delinquency logic, has been run and confirmed:
 
@@ -163,19 +163,51 @@ Layer 4 (UI)         → app/app/page.tsx dashboard: role toggle, LoanRequestPan
 
 ---
 
-## ✅ Just completed: Liquidation & delinquency logic (2026-07-25)
+## ✅ Recently completed (2026-07-25 → 26)
 
-Full stack, contract through UI through redeploy:
+Four things landed back to back. All are live on Sepolia and deployed to every branch URL.
 
-1. **Repayment deadline** — `repaymentDueAt() = fundedAt + durationDays` is fixed once a loan is funded.
-2. **Partial repayment** — `repay()` accepts any positive amount, tracked in `amountRepaid`, forwarded to the lender instantly; the loan only closes (collateral released) once the running total covers the live `outstandingBalance()`.
-3. **Overdue interest** — interest accrues continuously from `fundedAt` at the same `interestBps` rate (not just over the fixed original term), and is capped once the loan becomes liquidatable so it doesn't grow unbounded.
-4. **Real liquidation eligibility** — `markLiquidatedForDemo()` is gone; `liquidate()` only succeeds once `block.timestamp > repaymentDueAt() + GRACE_PERIOD` (2 days) with an unpaid balance. The oracle price-crash trigger was deliberately **not** added — see the ETH/ETH LTV design note above.
-5. **Frontend wired end-to-end** — `BorrowerLoansSection.tsx` gained a repay UI (there was none before); `LenderDashboard.tsx`'s liquidate button is now really gated with a live countdown; both share `frontend/lib/loan-abi.ts` instead of duplicating ABI arrays.
-6. **Redeployed to Sepolia** — new `LoanFactory`/`CollateralVault`/`MockPriceFeed` addresses (bytecode changed), `frontend/.env.local` updated. See addresses above.
-7. **Tested** — `contracts/test/LoanLifecycle.ts` (10 new tests) + the original `NexusFiMilestone1.ts` suite (2 tests), 12/12 passing. Frontend `tsc --noEmit` and `next build` both clean.
+1. **Repayment deadlines, partial repayment, overdue interest, real liquidation** (25th) — `repaymentDueAt()` from `fundedAt + durationDays`; `repay()` takes any amount with `amountRepaid` tracking; interest accrues continuously and is capped once liquidatable; `markLiquidatedForDemo()` replaced by a properly gated `liquidate()`. Borrower repay UI built from scratch; lender liquidate button really gated with a countdown.
+2. **Oracle price-crash liquidation** (26th) — debt frozen in USD at funding vs. live collateral value, so an ETH crash actually raises LTV. `liquidate()` now fires on *either* delinquency or collateral shortfall. LTV bar reads `currentLtvBps()` from the contract instead of the old price-independent client math.
+3. **Deployment** (26th) — Vercel, git-connected, per-branch URLs, auto-deploy via GitHub Actions (see Deployment section).
+4. **Demo controls** (26th) — `/demo` route to force both triggers on demand (see Demo controls section).
 
-**Immediate next step:** a full manual click-through against the redeployed Sepolia contracts hasn't been done yet this session (only the automated test suite + successful deploy transaction were verified) — worth doing before calling this closed. After that, **BUG-VIS** (loan visibility between users) is the next thing to pick up.
+**24/24 contract tests passing.** `tsc --noEmit` and `next build` clean.
+
+---
+
+## 🎯 NEXT: manual testing (before any new features)
+
+**Nothing about the above has been verified through the actual UI with two real people.** Only the automated suite and the deploy transactions are proven. That gap is the priority — features are on hold until it closes.
+
+Full checklist: **[tests/MANUAL_TEST_PLAN.md](tests/MANUAL_TEST_PLAN.md)**. Fill in the checkboxes and the findings table as you go.
+
+### Session plan (~60–90 min, one sitting)
+
+`/demo` collapses what used to be a 3-day exercise into minutes, so all four tracks fit in one session:
+
+| Order | Track | What | Time |
+|---|---|---|---|
+| 1 | **A** | Repayment lifecycle — partial, second partial, repay-in-full, overpay refund, plus the "should fail" cases | ~25 min |
+| 2 | **D** | Price crash via `/demo` — LTV climbs, threshold, liquidate, recovery, and the $0 broken-oracle fail-safe | ~15 min |
+| 3 | **B** | Deadline path via `/demo` → Skip time — past due badge, grace period blocking, liquidate after grace | ~15 min |
+| 4 | **C** | Two-user visibility — Afan borrows, Siddharth lends, do they see each other | ~15 min |
+
+**Prerequisites:** both people signed up + KYC'd (demo bypass) + wallet linked, both wallets holding Sepolia ETH, both on **testnet** mode. Supabase auth settings are done.
+
+**Expect to find things.** BUG-VIS (loans not reliably visible across accounts) is unfixed and Track C targets it directly — log what actually happens rather than working around it.
+
+### After testing
+
+Re-triage based on findings. Current expectation, highest value first:
+
+1. **BUG-VIS** — likely the real blocker for any two-person demo.
+2. **Lender risk-tier badges** — ~1hr, visibly missing, previously parked.
+3. **Multi-lender pooling** — biggest remaining gap vs. the literature review.
+
+### If you want to build in parallel tonight
+
+Something independent of the test findings, so a bug discovered in testing doesn't invalidate it: **lender risk-tier badges** (self-contained UI, no contract change) or **contract verification on Etherscan** (`--verify`, makes the demo more credible and touches nothing).
 
 ---
 
@@ -184,7 +216,7 @@ Full stack, contract through UI through redeploy:
 ### In scope for the project (confirmed by official docs)
 
 - **Multi-lender pooling** — the lender-journey doc explicitly describes partial fills across multiple lenders as "still MVP-feasible," not just a stretch goal. Needs: a contribution mapping per loan, a funding-closes-when-full condition, and pro-rata repayment distribution. ~1 day of contract + frontend work. Tracked in scope, not started.
-- **Oracle price-crash liquidation trigger** — the actual design fix, not just wiring: `principalAmount`/`collateralAmount` are both ETH-denominated today, so a price move doesn't change the LTV ratio. Needs either freezing a USD-denominated debt figure at origination, or a non-ETH principal asset (ties into the MockERC20 item below). Not started.
+- **Partial liquidation** — liquidation currently seizes all collateral rather than just enough to cover the debt. Needs `CollateralVault` changes too (its release/liquidate are one-shot, no amount parameter). Not started.
 - **Peer discovery** — there's no way for users to find/identify each other on the platform. A searchable directory of verified users (by display name or linked wallet address) would let teammates coordinate borrower/lender pairs instead of guessing loan IDs blind. Not started.
 
 ### Kept intentionally low priority (explicitly requested to stay "at bay")
