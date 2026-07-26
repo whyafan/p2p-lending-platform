@@ -15,6 +15,7 @@ import { sepolia, hardhat } from 'wagmi/chains';
 import { inferRiskTierFromBps, RISK_TIER_CONFIG, BASE_APR } from '../lib/loan-terms';
 import { formatUsd, formatPercent } from '../lib/format';
 import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
+import { LoanSafetyPanel } from './LoanSafetyPanel';
 import { ClipboardList, TrendingUp, Check, Hexagon, AlertTriangle } from 'lucide-react';
 
 const FUNDING_WINDOW_SECS = 7 * 24 * 60 * 60;
@@ -700,6 +701,20 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       </a>
                     </div>
 
+                    {/* Why this tier + what protects the lender, before they commit capital */}
+                    <div className="mt-3">
+                      <LoanSafetyPanel
+                        tier={tier}
+                        maxLtvBps={Number(terms.maxLtvBps)}
+                        liquidationBufferBps={Number(terms.liquidationBufferBps)}
+                        interestBps={Number(terms.interestBps)}
+                        durationDays={Number(terms.durationDays)}
+                        currentLtv={currentLtv}
+                        collateralUsd={collateralUsd}
+                        principalUsd={principalUsd}
+                      />
+                    </div>
+
                     {/* Tx feedback */}
                     {isFunding && fundingHash && (
                       <div className="mt-3 rounded-xl border border-blue-500/20 bg-blue-500/5 px-4 py-2.5 flex items-center gap-3">
@@ -914,6 +929,20 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                           Repayment due: <span className="font-mono text-slate-400">{dueDate}</span>
                         </span>
                       )}
+                    </div>
+
+                    <div className="mt-3">
+                      <LoanSafetyPanel
+                        tier={tier}
+                        maxLtvBps={Number(terms.maxLtvBps)}
+                        liquidationBufferBps={Number(terms.liquidationBufferBps)}
+                        interestBps={Number(terms.interestBps)}
+                        durationDays={Number(terms.durationDays)}
+                        currentLtv={currentLtv}
+                        collateralUsd={collateralUsd}
+                        principalUsd={principalUsd}
+                        isLiquidatable={canLiquidate}
+                      />
                     </div>
 
                     {/* Liquidate button — gated on-chain by isLiquidatable() (deadline + grace period) */}

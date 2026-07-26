@@ -219,13 +219,12 @@ Something independent of the test findings, so a bug discovered in testing doesn
 - **Partial liquidation** — liquidation currently seizes all collateral rather than just enough to cover the debt. Needs `CollateralVault` changes too (its release/liquidate are one-shot, no amount parameter). Not started.
 - **Peer discovery** — there's no way for users to find/identify each other on the platform. A searchable directory of verified users (by display name or linked wallet address) would let teammates coordinate borrower/lender pairs instead of guessing loan IDs blind. Not started.
 
-### Kept intentionally low priority (explicitly requested to stay "at bay")
+### Kept intentionally low priority
 
-- **Lender loan cards don't show borrower risk tier** — lenders currently see amount/collateral but not the tier (A/B/C) that produced the terms. ~1hr of work, high visual value, but deliberately not prioritized right now.
+- **Persist the borrower's risk explanation for lenders** — the tier badge and the safety panel are live, but the *feature-level* breakdown (the 8 weighted signals behind the score) is computed in the borrower's browser at request time and never stored, so lenders can't see it. The lender-journey doc asks for an "ML explainability summary". Would need a Supabase table keyed by loan ID, written at loan creation. Not started.
 
 ### Optional polish
 
-- Contracts verified on Sepolia Etherscan (`--verify` flag).
 - Network-switch prompt when MetaMask is on the wrong chain.
 - Loan filter/sort in the marketplace (by status, tier, APR).
 - Real `extract_features(wallet_address)` pipeline reading live from Alchemy/Etherscan (Phase 2).
@@ -273,6 +272,44 @@ Push to any of those branches → that branch's URL rebuilds automatically. No C
 ### Known gap to check before team testing
 
 If Supabase has "Confirm email" enabled, confirmation links point at Supabase's configured Site URL (likely still `localhost:3000`), which would break signup for anyone not on the dev machine. Either disable email confirmation (Supabase → Authentication → Providers → Email) or add the deployed URLs to Supabase's Site URL / Redirect URLs.
+
+---
+
+## Contract verification (2026-07-26)
+
+All three contracts are source-verified on **Blockscout** and **Sourcify**:
+
+| Contract | Blockscout |
+|---|---|
+| CollateralVault | [`0x0C0B…bf1f`](https://eth-sepolia.blockscout.com/address/0x0C0B2aa539Cbe0c3c93559508c46d0934fAbbf1f#code) |
+| MockPriceFeed | [`0x39d8…81Cb`](https://eth-sepolia.blockscout.com/address/0x39d857c414585C5aAef96Ca82Ea5C5F671F381Cb#code) |
+| LoanFactory | [`0xf345…10d0`](https://eth-sepolia.blockscout.com/address/0xf34505b3939374f8Cd71BE5D21c424c642c210d0#code) |
+
+Config lives in `hardhat.config.ts` under `verify`. Sourcify and Blockscout need no API key; **Etherscan is configured but disabled** until `ETHERSCAN_API_KEY` is set in `contracts/.env` (free key from <https://etherscan.io/apis>) — enabling it keyless makes every verify run fail.
+
+**Two gotchas worth remembering:**
+1. Verify **must** run with `--build-profile production`. Ignition deploys with the production profile (optimizer on, 200 runs) while `verify` defaults to the `default` profile (no optimizer), producing "bytecode does not match any of your local contracts".
+2. Run `npx hardhat compile --build-profile production` first — stale default-profile artifacts cause the same error even when the flag is passed.
+
+```bash
+cd contracts && npx hardhat compile --build-profile production
+npx hardhat verify --build-profile production --network sepolia <address> [ctorArgs...]
+# LoanFactory takes three: <vault> <priceFeed> true
+```
+
+Individual `Loan` contracts are deployed by the factory at runtime and aren't verified individually; their source is identical and covered by the verified factory.
+
+---
+
+## Lender risk transparency (2026-07-26)
+
+Tier A/B/C badges already existed on the lender cards (PLAN.md previously claimed otherwise — that entry was stale). What was missing was the *reasoning*, so `components/LoanSafetyPanel.tsx` now expands the badge into a collapsible panel on both the Open Requests and My Positions cards:
+
+- **Why this tier** — the tier→terms mapping made explicit (max LTV, APR split into base + risk spread, liquidation buffer, term), stressing the terms are rule-derived, not negotiated.
+- **Your protection** — over-collateralisation with actual USD figures, the liquidation threshold, and **how far ETH must fall from today's price** before the position becomes liquidatable (derived from the live on-chain LTV).
+- **What can go wrong** — liquidation isn't automatic and must be called; a fast crash can leave collateral short; repayment may arrive in instalments; a failed oracle disables price liquidation by design.
+
+Collapsed by default so it doesn't crowd the cards. Honest about its limits: it states plainly that the borrower's feature-level breakdown isn't persisted and so can't be shown.
 
 ---
 

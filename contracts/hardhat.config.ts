@@ -6,6 +6,16 @@ dotenv.config();
 
 export default defineConfig({
   plugins: [hardhatToolboxViemPlugin],
+  // Source verification. Sourcify and Blockscout need no API key, so they work
+  // out of the box; Etherscan needs a free key in ETHERSCAN_API_KEY and stays
+  // disabled without one (enabling it keyless makes every verify run fail).
+  verify: {
+    etherscan: process.env.ETHERSCAN_API_KEY
+      ? { apiKey: process.env.ETHERSCAN_API_KEY, enabled: true as const }
+      : { enabled: false as const },
+    sourcify: { enabled: true },
+    blockscout: { enabled: true },
+  },
   solidity: {
     profiles: {
       default: {
