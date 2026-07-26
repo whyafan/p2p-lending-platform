@@ -4,6 +4,8 @@ import { describe, it } from "node:test";
 import { network } from "hardhat";
 import { getAddress, parseEther } from "viem";
 
+const INITIAL_PRICE = 2_000n; // $2,000/ETH
+
 function getStructValue<T>(record: unknown, index: number, key: string): T {
   const value = Array.isArray(record)
     ? record[index]
@@ -22,9 +24,13 @@ describe("NexusFi Milestone 1", async function () {
       client: { wallet: deployer, public: publicClient },
     });
 
+    const mockPriceFeed = await viem.deployContract("MockPriceFeed", [INITIAL_PRICE], {
+      client: { wallet: deployer, public: publicClient },
+    });
+
     const loanFactory = await viem.deployContract(
       "LoanFactory",
-      [collateralVault.address],
+      [collateralVault.address, mockPriceFeed.address],
       { client: { wallet: deployer, public: publicClient } },
     );
 

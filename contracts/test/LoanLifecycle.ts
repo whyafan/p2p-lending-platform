@@ -13,6 +13,7 @@ function getStructValue<T>(record: unknown, index: number, key: string): T {
 }
 
 const DAY = 86_400n;
+const INITIAL_PRICE = 2_000n; // $2,000/ETH
 const GRACE_PERIOD = 2n * DAY;
 const BPS_DENOMINATOR = 10_000n;
 const YEAR_DAYS = 365n;
@@ -33,7 +34,7 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
   const publicClient = await viem.getPublicClient();
   const [deployer, borrower, lender] = await viem.getWalletClients();
 
-  const principalAmount = parseEther("5");
+  const principalAmount = parseEther("1");
   const collateralAmount = parseEther("2");
   const durationDays = 30n;
   const interestBps = 500n;
@@ -45,9 +46,13 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
       client: { wallet: deployer, public: publicClient },
     });
 
+    const mockPriceFeed = await viem.deployContract("MockPriceFeed", [INITIAL_PRICE], {
+      client: { wallet: deployer, public: publicClient },
+    });
+
     const loanFactory = await viem.deployContract(
       "LoanFactory",
-      [collateralVault.address],
+      [collateralVault.address, mockPriceFeed.address],
       { client: { wallet: deployer, public: publicClient } },
     );
 
@@ -72,7 +77,7 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
 
     await loanAsLender.write.fund({ account: lender.account, value: principalAmount });
 
-    return { collateralVault, loanFactory, loanAsLender, loanAsBorrower };
+    return { collateralVault, loanFactory, mockPriceFeed, loanAsLender, loanAsBorrower };
   }
 
   // NOTE on timing: Hardhat's EDR network timestamps auto-mined blocks using
@@ -87,9 +92,9 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
   it("supports partial repayments across multiple installments and releases collateral on the final one", async function () {
     const { collateralVault, loanAsLender, loanAsBorrower } = await deployFundedLoan();
 
-    // Well under the ~5+ ETH owed, so this is unambiguously a partial payment
+    // Well under the ~1 ETH owed, so this is unambiguously a partial payment
     // regardless of any timing drift.
-    const firstInstallment = parseEther("1");
+    const firstInstallment = parseEther("0.4");
 
     const lenderBalanceBefore1 = await publicClient.getBalance({ address: lender.account.address });
     await viem.assertions.emit(
@@ -231,7 +236,7 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
     assert.equal(await loanAsBorrower.read.isLiquidatable(), false);
     await viem.assertions.revertWith(
       loanAsLender.write.liquidate({ account: lender.account }),
-      "Loan: grace period not elapsed",
+      "Loan: not liquidatable",
     );
   });
 
@@ -288,5 +293,113 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
       loanAsBorrower.write.liquidate({ account: borrower.account }),
       "Loan: caller is not lender",
     );
+  });
+  // ── Price-based (collateral shortfall) liquidation ──────────────────────
+  //
+  // Debt is frozen in USD at funding (principal x price-at-funding) while the
+  // collateral is valued at the live price, so an ETH crash raises LTV.
+  // Fixture: 1 ETH borrowed against 2 ETH collateral at $2,000 => 50% LTV.
+  // Threshold = maxLtv 70% + buffer 10% = 80%, reached once ETH <= $1,250.
+
+  it("starts healthy: LTV well under threshold, not liquidatable on price", async function () {
+    const { loanAsBorrower } = await deployFundedLoan();
+
+    assert.equal(await loanAsBorrower.read.currentLtvBps(), 5_000n); // 50%
+    assert.equal(await loanAsBorrower.read.liquidationThresholdBps(), 8_000n);
+    assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), false);
+    assert.equal(await loanAsBorrower.read.isLiquidatable(), false);
+    assert.equal(await loanAsBorrower.read.priceAtFunding(), INITIAL_PRICE);
+  });
+
+  it("raises LTV as the ETH price falls, without touching the ETH-denominated debt", async function () {
+    const { mockPriceFeed, loanAsBorrower } = await deployFundedLoan();
+
+    const owedBefore = await loanAsBorrower.read.outstandingBalance();
+
+    await mockPriceFeed.write.setPrice([1_600n], { account: deployer.account });
+
+    // 1 ETH x $2000 debt / (2 ETH x $1600 collateral) = 62.5%
+    assert.equal(await loanAsBorrower.read.currentLtvBps(), 6_250n);
+    assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), false);
+
+    // Settlement stays ETH-denominated: what the borrower owes must NOT move
+    // with price (only the lender's USD exposure does).
+    const owedAfter = await loanAsBorrower.read.outstandingBalance();
+    assert.ok(owedAfter >= owedBefore, "owed should only grow via interest, not price");
+    assert.ok(owedAfter - owedBefore < parseEther("0.001"), "price move must not restate the debt");
+  });
+
+  it("becomes liquidatable once the crash pushes LTV to the threshold", async function () {
+    const { mockPriceFeed, loanAsBorrower } = await deployFundedLoan();
+
+    await mockPriceFeed.write.setPrice([1_251n], { account: deployer.account }); // just above
+    assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), false);
+
+    await mockPriceFeed.write.setPrice([1_250n], { account: deployer.account }); // exactly at
+    assert.equal(await loanAsBorrower.read.currentLtvBps(), 8_000n);
+    assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), true);
+    assert.equal(await loanAsBorrower.read.isLiquidatable(), true);
+    // Still inside the repayment window — this is purely the price trigger.
+    assert.equal(await loanAsBorrower.read.isDelinquentLiquidatable(), false);
+  });
+
+  it("lets the lender liquidate on a price crash while the loan is not yet overdue", async function () {
+    const { collateralVault, mockPriceFeed, loanAsLender, loanAsBorrower } = await deployFundedLoan();
+
+    await mockPriceFeed.write.setPrice([1_000n], { account: deployer.account });
+    assert.equal(await loanAsBorrower.read.isDelinquentLiquidatable(), false);
+
+    await viem.assertions.emitWithArgs(
+      loanAsLender.write.liquidate({ account: lender.account }),
+      loanAsLender,
+      "LoanLiquidated",
+      [0n, getAddress(lender.account.address)],
+    );
+
+    const position = await collateralVault.read.positions([0n]);
+    assert.equal(await loanAsBorrower.read.status(), 4); // Liquidated
+    assert.equal(getStructValue(position, 4, "liquidated"), true);
+  });
+
+  it("stops being price-liquidatable if the price recovers", async function () {
+    const { mockPriceFeed, loanAsLender, loanAsBorrower } = await deployFundedLoan();
+
+    await mockPriceFeed.write.setPrice([1_000n], { account: deployer.account });
+    assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), true);
+
+    await mockPriceFeed.write.setPrice([2_000n], { account: deployer.account });
+    assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), false);
+
+    await viem.assertions.revertWith(
+      loanAsLender.write.liquidate({ account: lender.account }),
+      "Loan: not liquidatable",
+    );
+  });
+
+  it("never liquidates on price when the oracle reports zero (bad data is not a crash)", async function () {
+    const { mockPriceFeed, loanAsLender, loanAsBorrower } = await deployFundedLoan();
+
+    await mockPriceFeed.write.setPrice([0n], { account: deployer.account });
+
+    assert.equal(await loanAsBorrower.read.currentPrice(), 0n);
+    assert.equal(await loanAsBorrower.read.currentLtvBps(), 0n); // "unknown", not "healthy"
+    assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), false);
+
+    await viem.assertions.revertWith(
+      loanAsLender.write.liquidate({ account: lender.account }),
+      "Loan: not liquidatable",
+    );
+  });
+
+  it("reports zero LTV once the loan is closed", async function () {
+    const { mockPriceFeed, loanAsBorrower } = await deployFundedLoan();
+
+    const owed = await loanAsBorrower.read.outstandingBalance();
+    await loanAsBorrower.write.repay({ account: borrower.account, value: owed + parseEther("0.1") });
+
+    await mockPriceFeed.write.setPrice([100n], { account: deployer.account });
+    assert.equal(await loanAsBorrower.read.currentLtvBps(), 0n);
+    assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), false);
+    assert.equal(await loanAsBorrower.read.isLiquidatable(), false);
   });
 });

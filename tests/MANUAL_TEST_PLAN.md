@@ -28,10 +28,10 @@ All four URLs share the **same Sepolia contracts and the same Supabase database*
 - [ ] Both passed KYC via the demo bypass (`ALLOW_DEMO_KYC=1` is on — no real ID needed)
 - [ ] Network toggle set to **testnet** on both
 
-**Deployed contracts under test** (redeployed 2026-07-25):
-- LoanFactory `0x2005F0798c4B96361586b60BdBAdfB54570894e4`
-- CollateralVault `0x9b525FDb19cB1a1764acB5C58d171462Bec83C93`
-- MockPriceFeed `0x353AbD44C5e83bF441fbcCeCA5373A330F61CB61`
+**Deployed contracts under test** (redeployed 2026-07-26):
+- LoanFactory `0x3C4083D4C3E091aCf44bc7E13111fa219F5C4500`
+- CollateralVault `0xF5903a5EF8A9226Df08b4079C72AACa38117c153`
+- MockPriceFeed `0x06bfefD8ba2EdAC5157aE929a8E595aB90a33495`
 
 ---
 
@@ -75,6 +75,29 @@ Do this on its own loan, separate from Track A. Note funding time — everything
 
 ---
 
+## Track D — Price-crash liquidation (fast, no waiting)
+
+The other liquidation trigger: an ETH price crash raising LTV past the threshold.
+Unlike Track B this needs **no waiting** — you set the mock price directly.
+
+How it works: the debt is frozen in USD at funding (principal x price-at-funding) while
+collateral is valued at the live price. Drop the price and LTV climbs. With a 70% max LTV
+and 10% buffer, the threshold is 80%; a loan at 50% LTV becomes liquidatable once the price
+falls to ~62.5% of its funding value.
+
+Only the deployer wallet (contract owner) can call `setPrice` on MockPriceFeed
+(`0x06bfefD8ba2EdAC5157aE929a8E595aB90a33495`) — that's Afan's deployer key.
+
+- [ ] **D1** — Create + fund a loan (any duration). Note the LTV shown on the lender's position card
+- [ ] **D2** — Verify the LTV shown now comes from the contract (`currentLtvBps()`), not the old client-side math. Liquidate is disabled
+- [ ] **D3** — Crash the price to ~70% of funding price. Verify LTV **rises** on the lender card and the borrower's owed amount does **not** change
+- [ ] **D4** — Crash further, past the threshold. Verify the card shows **"LIQUIDATABLE — collateral shortfall"** and the button enables
+- [ ] **D5** — Restore the price. Verify it becomes non-liquidatable again and the button disables
+- [ ] **D6** — Crash again and actually liquidate. Verify collateral moves to the lender, status → `Liquidated`
+- [ ] **D7 fail-safe** — Set price to `0`. Verify LTV shows as unknown/oracle-unavailable and liquidation is **blocked** (bad oracle data must never seize collateral)
+
+---
+
 ## Track C — Two-user / cross-account sanity
 
 This is where **BUG-VIS** (loans not always visible between accounts) is expected to show up. Log observations, we'll fix separately.
@@ -101,4 +124,5 @@ This is where **BUG-VIS** (loans not always visible between accounts) is expecte
 - **BUG-03** — interest rounds to 0 for tiny loans (<~3650 wei). Use ≥0.01 ETH.
 - **BUG-11** — loan ID race if two loans are created simultaneously.
 - **BUG-14** — `liquidationBufferBps` missing from some lender views (cosmetic).
-- **Oracle liquidation is not wired** — the mock price-crash panel changes the LTV bar but does **not** gate liquidation. Liquidation is deadline-based only. Principal and collateral are both ETH-denominated, so price moves don't change the LTV ratio; needs a separate redesign.
+- **Partial liquidation not supported** — liquidation always seizes the full collateral, never just enough to cover the debt (CollateralVault is one-shot/all-or-nothing).
+- **Loan amounts are USD-framed in the UI but ETH-settled on-chain** — a price move changes the lender's USD exposure and can trigger liquidation, but never restates what the borrower owes in ETH. Deliberate; see PLAN.md.

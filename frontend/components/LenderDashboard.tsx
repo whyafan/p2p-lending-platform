@@ -208,9 +208,51 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     [loanContractAddresses, chainId],
   );
 
+  // Live LTV straight from the contract: frozen USD debt over current USD
+  // collateral value. The old client-side principalUsd/collateralUsd was
+  // price-independent (both legs are ETH) and so could never show a crash.
+  const ltvContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'currentLtvBps' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+
+  const priceLiqContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'isPriceLiquidatable' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+
+  const delinqLiqContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'isDelinquentLiquidatable' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+
   const { data: isLiquidatableResults, refetch: refetchIsLiquidatable } = useReadContracts({
     contracts: isLiquidatableContracts,
     query: { enabled: isLiquidatableContracts.length > 0, refetchInterval: 15_000 },
+  });
+
+  const { data: ltvResults, refetch: refetchLtv } = useReadContracts({
+    contracts: ltvContracts,
+    query: { enabled: ltvContracts.length > 0, refetchInterval: 15_000 },
+  });
+
+  const { data: priceLiqResults, refetch: refetchPriceLiq } = useReadContracts({
+    contracts: priceLiqContracts,
+    query: { enabled: priceLiqContracts.length > 0, refetchInterval: 15_000 },
+  });
+
+  const { data: delinqLiqResults, refetch: refetchDelinqLiq } = useReadContracts({
+    contracts: delinqLiqContracts,
+    query: { enabled: delinqLiqContracts.length > 0, refetchInterval: 15_000 },
   });
 
   const { data: repaymentDueAtResults, refetch: refetchRepaymentDueAt } = useReadContracts({
@@ -257,6 +299,33 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     return map;
   }, [repaymentDueAtContracts, repaymentDueAtResults]);
 
+  const ltvByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    ltvContracts.forEach((c, i) => {
+      const r = ltvResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [ltvContracts, ltvResults]);
+
+  const priceLiqByAddress = useMemo(() => {
+    const map = new Map<string, boolean>();
+    priceLiqContracts.forEach((c, i) => {
+      const r = priceLiqResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as boolean);
+    });
+    return map;
+  }, [priceLiqContracts, priceLiqResults]);
+
+  const delinqLiqByAddress = useMemo(() => {
+    const map = new Map<string, boolean>();
+    delinqLiqContracts.forEach((c, i) => {
+      const r = delinqLiqResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as boolean);
+    });
+    return map;
+  }, [delinqLiqContracts, delinqLiqResults]);
+
   async function refetchAll() {
     await Promise.all([
       refetchIds(),
@@ -264,6 +333,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       refetchLenders(),
       refetchIsLiquidatable(),
       refetchRepaymentDueAt(),
+      refetchLtv(),
+      refetchPriceLiq(),
+      refetchDelinqLiq(),
     ]);
   }
 
@@ -297,9 +369,18 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const lenderAddr = loanAddr !== undefined ? lenderByAddress.get(loanAddr) : undefined;
       const isLiquidatableVal = loanAddr !== undefined ? isLiquidatableByAddress.get(loanAddr) : undefined;
       const repaymentDueAtVal = loanAddr !== undefined ? repaymentDueAtByAddress.get(loanAddr) : undefined;
-      return { id, terms, statusVal, lenderAddr, isLiquidatableVal, repaymentDueAtVal };
+      const ltvBpsVal = loanAddr !== undefined ? ltvByAddress.get(loanAddr) : undefined;
+      const priceLiqVal = loanAddr !== undefined ? priceLiqByAddress.get(loanAddr) : undefined;
+      const delinqLiqVal = loanAddr !== undefined ? delinqLiqByAddress.get(loanAddr) : undefined;
+      return {
+        id, terms, statusVal, lenderAddr, isLiquidatableVal, repaymentDueAtVal,
+        ltvBpsVal, priceLiqVal, delinqLiqVal,
+      };
     });
-  }, [loanIds, termsResults, statusByAddress, lenderByAddress, isLiquidatableByAddress, repaymentDueAtByAddress]);
+  }, [
+    loanIds, termsResults, statusByAddress, lenderByAddress, isLiquidatableByAddress,
+    repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress,
+  ]);
 
   const openLoans = useMemo(
     () => loans.filter((l) => l.statusVal === 0 && l.terms && !isExpired(l.terms.createdAt)),
@@ -473,12 +554,13 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 const principalUsd = ethPrice > 0 ? principalEth * ethPrice : null;
                 const collateralUsd = ethPrice > 0 ? collateralEth * ethPrice : null;
 
-                // Current LTV = principal / collateral (collateral in USD terms)
+                // Origination LTV = principal / collateral. Price-independent by
+                // design (both legs are ETH) — correct for a not-yet-funded loan,
+                // since the USD debt is only frozen at funding time.
                 const currentLtv =
                   collateralUsd && collateralUsd > 0 ? (principalUsd ?? 0) / collateralUsd : null;
-                const liqThreshold = tierCfg
-                  ? tierCfg.maxLtv + tierCfg.liquidationBuffer
-                  : null;
+                const liqThreshold =
+                  (Number(terms.maxLtvBps) + Number(terms.liquidationBufferBps)) / 10_000;
                 const ltvColor =
                   currentLtv !== null && liqThreshold !== null
                     ? currentLtv < liqThreshold * 0.8
@@ -690,7 +772,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             </div>
           ) : (
             <div className="space-y-3">
-              {myPositions.map(({ id, terms, isLiquidatableVal, repaymentDueAtVal }) => {
+              {myPositions.map(({ id, terms, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -701,13 +783,17 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 const principalUsd = ethPrice > 0 ? principalEth * ethPrice : null;
                 const collateralUsd = ethPrice > 0 ? collateralEth * ethPrice : null;
 
-                const currentLtv =
+                // LTV read from the contract (frozen USD debt / live USD collateral).
+                // 0 means "unknown" (no oracle data), not "healthy" — fall back to
+                // the static ratio only for display in that case.
+                const onChainLtv =
+                  ltvBpsVal !== undefined && Number(ltvBpsVal) > 0 ? Number(ltvBpsVal) / 10_000 : null;
+                const staticLtv =
                   collateralUsd && collateralUsd > 0 ? (principalUsd ?? 0) / collateralUsd : null;
-                const liqThreshold = tierCfg
-                  ? tierCfg.maxLtv + tierCfg.liquidationBuffer
-                  : null;
-                const isLtvBreached =
-                  currentLtv !== null && liqThreshold !== null && currentLtv >= liqThreshold;
+                const currentLtv = onChainLtv ?? staticLtv;
+                const liqThreshold =
+                  (Number(terms.maxLtvBps) + Number(terms.liquidationBufferBps)) / 10_000;
+                const isLtvBreached = priceLiqVal === true;
 
                 const interestEarned =
                   principalUsd !== null
@@ -717,6 +803,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 const isLiquidating = liqLoanId === id;
                 // The real, on-chain gate: liquidate() only succeeds once this is true.
                 const canLiquidate = isLiquidatableVal === true;
+                const liqReason = priceLiqVal
+                  ? 'collateral shortfall'
+                  : delinqLiqVal
+                  ? 'overdue'
+                  : null;
                 const countdown = liquidationCountdown(repaymentDueAtVal);
                 const dueDate =
                   repaymentDueAtVal !== undefined
@@ -743,14 +834,10 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${STATUS_COLORS[1]}`}>
                           Funded
                         </span>
-                        {isLtvBreached && (
-                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border border-red-500/40 bg-red-500/20 text-red-400">
-                            LTV BREACH
-                          </span>
-                        )}
                         {canLiquidate && (
                           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border border-red-500/40 bg-red-500/20 text-red-400 flex items-center gap-1">
-                            <AlertTriangle className="h-2.5 w-2.5" /> LIQUIDATABLE
+                            <AlertTriangle className="h-2.5 w-2.5" />
+                            LIQUIDATABLE{liqReason ? ` — ${liqReason}` : ''}
                           </span>
                         )}
                       </div>
@@ -789,11 +876,14 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       </div>
                     </div>
 
-                    {/* LTV bar */}
-                    {currentLtv !== null && liqThreshold !== null && (
+                    {/* LTV bar — driven by the contract's own currentLtvBps() */}
+                    {currentLtv !== null && (
                       <div className="space-y-1 mb-4">
                         <div className="flex justify-between text-[10px] text-slate-500">
-                          <span>Current LTV: <span className="font-mono font-bold text-white">{formatPercent(currentLtv)}</span></span>
+                          <span>
+                            Current LTV: <span className="font-mono font-bold text-white">{formatPercent(currentLtv)}</span>
+                            {onChainLtv === null && <span className="ml-1 text-slate-600">(oracle unavailable)</span>}
+                          </span>
                           <span>Liquidation at <span className="font-mono text-red-400">{formatPercent(liqThreshold)}</span></span>
                         </div>
                         <div className="relative h-2.5 w-full rounded-full bg-slate-800 overflow-hidden">

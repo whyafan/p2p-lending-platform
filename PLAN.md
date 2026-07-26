@@ -1,6 +1,6 @@
 # NexusFi P2P Lending Platform — Implementation Plan
 
-> Last updated: 2026-07-25
+> Last updated: 2026-07-26
 > Team: K.J. Somaiya School of Engineering final-year project (Afan Khan, Atharva Patil, Viren Rathod, Siddharth Singh). Stack: Next.js 16 + React 19 + wagmi v2 + viem + Solidity 0.8.28 + Hardhat 3 (Ignition) + Supabase + Tailwind v4. Optional FastAPI credit-scoring backend.
 > Official reference docs (in `docs/archive/` unless noted): the literature review (`Literature Review_ P2P Blockchain Lending Platform`), the K.J. Somaiya project brief (`Blockchain_P2P_Lending_Platform.md`), and the borrower/lender user-journey spec. This file is the **living, code-accurate** status tracker — read it before the academic docs, since those describe intent and this describes what actually runs.
 
@@ -23,7 +23,7 @@ The literature review and project brief describe an ambitious target architectur
 | EIP-712 signed term sheet before loan creation | ✅ Implemented. |
 | IPFS-anchored term sheets, hash-only PII references | ❌ Not built. Term sheets aren't persisted to IPFS; off-chain metadata lives in Supabase only. |
 | On-chain event indexer + dashboards (default rate, liquidation count, avg APR, ML score distribution) | ❌ Not built. Current UI reads live via wagmi multicall on page load/refresh, not an indexer. Works fine at demo scale, won't scale to many loans. |
-| Oracle-driven automatic liquidation with delinquency state machine (Delinquent → Default → Liquidated, buffer period, partial liquidation) | 🟡 **Delinquency half done (2026-07-25).** `liquidate()` now enforces a real deadline + 2-day grace period gate, replacing the old unconditional `markLiquidatedForDemo()`. Still missing: the oracle price-crash trigger (deliberately deferred — see note below) and partial liquidation (collateral release is still all-or-nothing, matching `CollateralVault`'s existing interface). |
+| Oracle-driven automatic liquidation with delinquency state machine (Delinquent → Default → Liquidated, buffer period, partial liquidation) | 🟡 **Both triggers done (2026-07-26).** `liquidate()` fires on either a missed deadline + 2-day grace period, **or** an oracle-priced LTV breach — replacing the old unconditional `markLiquidatedForDemo()`. Still missing: partial liquidation (collateral release is all-or-nothing, matching `CollateralVault`'s one-shot interface) and explicit named `Delinquent`/`Default` enum states (currently derived from views rather than stored). |
 | Repayment deadline enforcement | ✅ **Done (2026-07-25).** `repaymentDueAt()` derives a fixed deadline from `fundedAt + durationDays`; `isDelinquent()`/`isLiquidatable()` expose the real-time state to the UI. |
 | Partial repayments | ✅ **Done (2026-07-25).** `repay()` accepts any amount > 0, tracked via `amountRepaid`; the loan only closes once the full live `outstandingBalance()` is covered. Borrower UI has a repay control (custom amount or "Repay in full") in `BorrowerLoansSection.tsx`. |
 | Overdue interest accrual | ✅ **Done (2026-07-25).** Interest now accrues continuously from `fundedAt` (not just over the fixed `durationDays` term) and keeps growing past the deadline — but is capped at `repaymentDueAt() + GRACE_PERIOD` so it doesn't inflate forever once a loan is liquidatable. |
@@ -32,9 +32,22 @@ The literature review and project brief describe an ambitious target architectur
 | Decentralized identity / on-chain KYC | 🟡 Partial — off-chain KYC (Didit + Supabase) bound to wallet address via linked-wallet signature verification. `KYCRegistry.sol` exists as an on-chain reference contract but is intentionally unused in the live flow (documented in the project brief as a "M1 reference," not accidental cruft — left in place). |
 | Privacy-by-design (PII off-chain, encrypted) | ✅ Conceptually aligned — Supabase holds PII, service-role key required, no PII on-chain — though without the IPFS/hash-anchoring layer the official docs describe. |
 
-**Note on the deferred oracle price-crash trigger:** wiring `MockPriceFeed` into `Loan.sol`'s liquidation logic was deliberately scoped out of the 2026-07-25 liquidation work. The reason is a real design snag, not just time pressure: `principalAmount` and `collateralAmount` are both denominated in ETH on-chain, so an ETH price move changes both sides of the LTV ratio equally and doesn't actually change the ratio. The frontend's LTV health bar recomputes the ratio using the *current* price on both sides, which is mathematically a no-op for triggering liquidation — it's a display effect, not a real risk signal yet. Fixing this properly needs either freezing a USD-denominated debt figure at loan origination or moving to a non-ETH principal asset; that's a separate redesign, not a quick add-on.
+**How the oracle price trigger works (added 2026-07-26).** The original problem: `principalAmount` and `collateralAmount` are both ETH, so `principal/collateral` is a constant ratio that an ETH price move cannot change — the old LTV bar recomputed both legs at the current price, which is mathematically a no-op and could never signal real risk.
 
-**Bottom line:** the demo's happy path (create → fund → repay/liquidate) is real and works on Sepolia, and as of 2026-07-25 so is the deadline/delinquency-based liquidation path, wired end-to-end from contract to UI. The remaining gap between "what the report describes" and "what runs" is the oracle-price liquidation trigger (needs a design fix, see note above), multi-lender pooling, and the observability/IPFS layer described in the backlog below.
+The fix is to **freeze the debt in USD at funding** while continuing to value collateral live:
+
+```
+debtValueUsd    = principalAmount x price AT FUNDING   (fixed)
+collateralValue = collateralAmount x price NOW         (floats)
+LTV             = debtValueUsd / collateralValueUsd
+liquidatable    when LTV >= maxLtvBps + liquidationBufferBps
+```
+
+This reproduces the project brief's own worked example exactly: $1,400 borrowed against $2,000 of collateral at 70% max LTV / 80% threshold becomes liquidatable once the collateral falls to $1,750. Concretely, in the test fixture 1 ETH borrowed against 2 ETH at $2,000 sits at 50% LTV and becomes liquidatable when ETH hits $1,250.
+
+**Deliberate simplification:** settlement stays ETH-denominated — `repay()` still owes principal + interest in ETH, and a price move does **not** restate what the borrower owes (there's a test asserting this). The USD figure exists solely to measure the *lender's* exposure and gate liquidation. A fully USD-denominated loan would make the repayment amount float with price on every block; that's a bigger change and worse UX for a demo. **Fail-safe:** if the oracle is missing, reverting, or returns 0, `currentLtvBps()` returns 0 meaning *unknown* (not "healthy") and price liquidation is disabled — bad oracle data can never seize someone's collateral.
+
+**Bottom line:** the demo's happy path (create → fund → repay/liquidate) works on Sepolia, and both liquidation triggers — delinquency and collateral shortfall — are now live end-to-end from contract to UI. The remaining gaps versus the report are multi-lender pooling, partial liquidation, and the observability/IPFS layer in the backlog below.
 
 ---
 
@@ -64,11 +77,11 @@ closes and collateral releases to borrower               to the lender. Blocked 
 
 Every step (create, fund, repay — partial or full, cancel, liquidate, set mock price) emits a transaction and the UI shows a live `sepolia.etherscan.io/tx/{hash}` link. Contract-level correctness (partial repayment sequences, overpayment refunds, interest accrual matching the fixed-duration formula at the deadline boundary and staying flat past the liquidation cap, liquidate() reverting/succeeding at the right times) is covered by 10 new tests in `contracts/test/LoanLifecycle.ts`, all passing alongside the original `NexusFiMilestone1.ts` suite (12/12 total). Full manual click-through of the redeployed contracts via the live UI has not yet been done in this session — only the automated test suite and the deploy transaction itself have been verified.
 
-Deployed contracts (redeployed 2026-07-25 for the `Loan.sol` liquidation rewrite — bytecode changed, so these addresses are new; the pre-2026-07-25 addresses below are abandoned):
+Deployed contracts (redeployed 2026-07-26 — `LoanFactory`'s constructor now takes the price feed, so all three addresses changed again; earlier addresses are abandoned):
 
-- LoanFactory: `0x2005F0798c4B96361586b60BdBAdfB54570894e4`
-- CollateralVault: `0x9b525FDb19cB1a1764acB5C58d171462Bec83C93`
-- MockPriceFeed: `0x353AbD44C5e83bF441fbcCeCA5373A330F61CB61`
+- LoanFactory: `0x3C4083D4C3E091aCf44bc7E13111fa219F5C4500`
+- CollateralVault: `0xF5903a5EF8A9226Df08b4079C72AACa38117c153`
+- MockPriceFeed: `0x06bfefD8ba2EdAC5157aE929a8E595aB90a33495`
 
 All three are populated in `frontend/.env.local`.
 
@@ -231,6 +244,16 @@ If Supabase has "Confirm email" enabled, confirmation links point at Supabase's 
 
 ---
 
+## Change Log — Oracle price-crash liquidation (2026-07-26)
+
+- `Loan.sol` — added `priceFeed` (11th constructor arg, may be `address(0)`), `debtValueUsd` + `priceAtFunding` frozen in `fund()`, and views `currentPrice()`, `currentLtvBps()`, `liquidationThresholdBps()`, `isPriceLiquidatable()`, `isDelinquentLiquidatable()`. `liquidate()` now accepts either trigger; `isLiquidatable()` is their union. Oracle reads go through a `try/catch` helper so a missing or reverting feed degrades to "price liquidation disabled" instead of bricking every view.
+- `LoanFactory.sol` — constructor takes `priceFeed_` and passes it to every `Loan`. **This changed the factory ABI, forcing a full redeploy.**
+- `ignition/modules/NexusFiMilestone1.ts` — `MockPriceFeed` now deploys *before* `LoanFactory`.
+- `contracts/test/LoanLifecycle.ts` — 7 new price tests (healthy start, LTV rising as price falls, threshold boundary at exactly $1,250, liquidation while not overdue, recovery un-liquidating, zero-price fail-safe, closed loans reporting 0). **Fixture changed** from 5 ETH principal / 2 ETH collateral (a 250% LTV that would have been instantly price-liquidatable and broke the deadline tests) to a realistic 1 ETH / 2 ETH. 19/19 passing.
+- `frontend/lib/loan-abi.ts` + `LenderDashboard.tsx` — the LTV bar now reads `currentLtvBps()` from the contract instead of the old client-side `principalUsd/collateralUsd`, which was price-independent and could never show a crash. The liquidate badge names the reason ("overdue" vs "collateral shortfall"). Open Requests still shows the static origination LTV, which is correct there — the USD debt isn't frozen until funding.
+
+---
+
 ## Change Log — Liquidation & delinquency rewrite (2026-07-25)
 
 - `contracts/contracts/Loan.sol` — added `GRACE_PERIOD`, `amountRepaid`, `closedAt`; added `repaymentDueAt()`, `isDelinquent()`, `isLiquidatable()`, `outstandingBalance()`; changed `interestDue()`/`totalRepaymentDue()` to accrue continuously (capped) instead of using the fixed `durationDays` term; rewrote `repay()` for partial payments; replaced `markLiquidatedForDemo()` with `liquidate()`; added `PartialRepayment` event. No constructor change — `LoanFactory.sol`'s `new Loan(...)` call site untouched.
@@ -268,7 +291,7 @@ If Supabase has "Confirm email" enabled, confirmation links point at Supabase's 
 | `frontend/lib/risk-explainer.ts` | Layer 2 — explainable scoring engine |
 | `frontend/lib/loan-terms.ts` | Tier → loan term mapping |
 | `frontend/lib/loan-abi.ts` | Shared `Loan`/`LoanFactory` ABI (used by LenderDashboard + BorrowerLoansSection) |
-| `contracts/test/LoanLifecycle.ts` | Repayment deadline, partial repayment, interest cap, liquidation behavior spec |
+| `contracts/test/LoanLifecycle.ts` | Repayment deadline, partial repayment, interest cap, both liquidation triggers |
 | `frontend/components/RiskExplanationPanel.tsx` | XAI transparency UI |
 | `frontend/components/LoanRequestPanel.tsx` | Borrower loan creation wizard |
 | `frontend/components/LenderDashboard.tsx` | Lender marketplace + funding + liquidation |

@@ -18,6 +18,8 @@ contract LoanFactory {
     }
 
     CollateralVault public immutable collateralVault;
+    /// Oracle passed to every Loan for price-based liquidation. May be address(0).
+    address public immutable priceFeed;
     uint256 public nextLoanId;
 
     mapping(uint256 => LoanTerms) public loans;
@@ -31,9 +33,11 @@ contract LoanFactory {
         uint256 collateralAmount
     );
 
-    constructor(address collateralVault_) {
+    constructor(address collateralVault_, address priceFeed_) {
         require(collateralVault_ != address(0), "LoanFactory: vault is zero address");
         collateralVault = CollateralVault(payable(collateralVault_));
+        // address(0) is permitted: loans then fall back to deadline-only liquidation.
+        priceFeed = priceFeed_;
     }
 
     function createLoan(
@@ -61,7 +65,8 @@ contract LoanFactory {
             interestBps,
             maxLtvBps,
             liquidationBufferBps,
-            address(collateralVault)
+            address(collateralVault),
+            priceFeed
         );
 
         loanContract = address(loan);

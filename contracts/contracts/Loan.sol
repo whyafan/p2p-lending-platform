@@ -10,6 +10,11 @@ interface ICollateralVault {
     function liquidateCollateral(uint256 loanId, address payable recipient) external;
 }
 
+interface IPriceFeed {
+    /// @return ETH/USD price in whole dollars (e.g. 2000 for $2,000).
+    function latestPrice() external view returns (uint256);
+}
+
 contract Loan is ReentrancyGuard {
     using Address for address payable;
 
@@ -40,6 +45,34 @@ contract Loan is ReentrancyGuard {
     uint256 public immutable liquidationBufferBps;
     uint256 public immutable requestedAt;
     uint256 public fundedAt;
+
+    /// Oracle used to value collateral in USD. May be address(0), in which case
+    /// price-based liquidation is simply disabled and only the repayment
+    /// deadline can trigger liquidation.
+    address public immutable priceFeed;
+
+    // --- Price-based liquidation state -------------------------------------
+    //
+    // Collateral and principal are both denominated in ETH, so principal/collateral
+    // is a constant ratio that an ETH price move cannot change. To make the oracle
+    // economically meaningful, the debt is frozen in USD at funding time:
+    //
+    //   debtValueUsd     = principalAmount x price AT FUNDING      (fixed)
+    //   collateralValue  = collateralAmount x price NOW            (floats)
+    //   LTV              = debtValueUsd / collateralValueUsd
+    //
+    // So if ETH falls, the collateral securing the loan is worth less against a
+    // fixed USD debt, LTV climbs, and the position becomes liquidatable — which
+    // is exactly the worked example in the project brief ($1,400 debt against
+    // $2,000 collateral liquidating once collateral falls to $1,750).
+    //
+    // Both values carry units of wei x USD; the ratio is dimensionless, so no
+    // rescaling is needed. Settlement stays ETH-denominated (see repay()) —
+    // the USD figure exists to measure the lender's exposure, not to restate
+    // what the borrower owes.
+    uint256 public debtValueUsd;
+    /// ETH/USD price recorded at funding, for transparency in the UI. 0 if no oracle.
+    uint256 public priceAtFunding;
 
     // Cumulative wei applied toward totalRepaymentDue() so far. Repayment is a
     // lump sum against the live outstanding balance (no principal/interest split,
@@ -86,7 +119,8 @@ contract Loan is ReentrancyGuard {
         uint256 interestBps_,
         uint256 maxLtvBps_,
         uint256 liquidationBufferBps_,
-        address collateralVault_
+        address collateralVault_,
+        address priceFeed_
     ) {
         require(factory_ != address(0), "Loan: factory is zero address");
         require(borrower_ != address(0), "Loan: borrower is zero address");
@@ -106,6 +140,7 @@ contract Loan is ReentrancyGuard {
         maxLtvBps = maxLtvBps_;
         liquidationBufferBps = liquidationBufferBps_;
         collateralVault = collateralVault_;
+        priceFeed = priceFeed_; // address(0) allowed — disables price-based liquidation
         requestedAt = block.timestamp;
         status = LoanStatus.Requested;
     }
@@ -119,6 +154,15 @@ contract Loan is ReentrancyGuard {
         lender = msg.sender;
         fundedAt = block.timestamp;
         status = LoanStatus.Funded;
+
+        // Freeze the USD value of the debt at funding. If the oracle is absent
+        // or unhealthy this stays 0, which disables price-based liquidation for
+        // this loan rather than letting bad data seize someone's collateral.
+        uint256 price = _readPrice();
+        if (price > 0) {
+            priceAtFunding = price;
+            debtValueUsd = principalAmount * price;
+        }
 
         payable(borrower).sendValue(msg.value);
         emit LoanFunded(loanId, msg.sender, msg.value);
@@ -168,18 +212,68 @@ contract Loan is ReentrancyGuard {
         emit LoanCancelled(loanId);
     }
 
-    // Real liquidation eligibility: only callable once the borrower is
-    // genuinely delinquent (past the repayment deadline plus a grace period).
+    // Real liquidation eligibility. Two independent triggers:
+    //   1. Delinquency — past the repayment deadline plus the grace period.
+    //   2. Collateral shortfall — oracle-priced LTV at or above the liquidation
+    //      threshold (maxLtv + buffer), i.e. an ETH price crash.
     // Replaces the old unconditional markLiquidatedForDemo() bypass.
     function liquidate() external onlyLender nonReentrant {
         require(status == LoanStatus.Funded, "Loan: not active");
-        require(block.timestamp > repaymentDueAt() + GRACE_PERIOD, "Loan: grace period not elapsed");
+        require(
+            isDelinquentLiquidatable() || isPriceLiquidatable(),
+            "Loan: not liquidatable"
+        );
 
         status = LoanStatus.Liquidated;
         closedAt = block.timestamp;
 
         ICollateralVault(collateralVault).liquidateCollateral(loanId, payable(lender));
         emit LoanLiquidated(loanId, msg.sender);
+    }
+
+    // Reads the oracle defensively: a missing or reverting feed yields 0 rather
+    // than bricking every view that touches price.
+    function _readPrice() internal view returns (uint256) {
+        if (priceFeed == address(0)) return 0;
+        try IPriceFeed(priceFeed).latestPrice() returns (uint256 p) {
+            return p;
+        } catch {
+            return 0;
+        }
+    }
+
+    /// Current ETH/USD price from the oracle. 0 when unavailable.
+    function currentPrice() public view returns (uint256) {
+        return _readPrice();
+    }
+
+    /// LTV where liquidation becomes available, in bps (maxLtv + buffer).
+    function liquidationThresholdBps() public view returns (uint256) {
+        return maxLtvBps + liquidationBufferBps;
+    }
+
+    /// Live LTV in bps: frozen USD debt over current USD collateral value.
+    /// Returns 0 when it cannot be computed (not funded, or no oracle data) —
+    /// callers must treat 0 as "unknown", not as "perfectly healthy".
+    function currentLtvBps() public view returns (uint256) {
+        if (status != LoanStatus.Funded || debtValueUsd == 0) return 0;
+        uint256 price = _readPrice();
+        if (price == 0) return 0;
+        uint256 collateralValueUsd = collateralAmount * price;
+        if (collateralValueUsd == 0) return 0;
+        return Math.mulDiv(debtValueUsd, 10_000, collateralValueUsd);
+    }
+
+    /// True once the collateral no longer covers the debt at the threshold.
+    function isPriceLiquidatable() public view returns (bool) {
+        uint256 ltv = currentLtvBps();
+        if (ltv == 0) return false; // unknown price => never liquidate on price
+        return ltv >= liquidationThresholdBps();
+    }
+
+    /// True once the borrower has missed the deadline and burned the grace period.
+    function isDelinquentLiquidatable() public view returns (bool) {
+        return status == LoanStatus.Funded && block.timestamp > repaymentDueAt() + GRACE_PERIOD;
     }
 
     // Timestamp up to which interest should accrue: while the loan is Funded,
@@ -227,7 +321,8 @@ contract Loan is ReentrancyGuard {
     }
 
     // The exact condition liquidate() enforces — safe for the frontend to poll.
+    // Use isDelinquentLiquidatable() / isPriceLiquidatable() to tell the user *why*.
     function isLiquidatable() public view returns (bool) {
-        return status == LoanStatus.Funded && block.timestamp > repaymentDueAt() + GRACE_PERIOD;
+        return isDelinquentLiquidatable() || isPriceLiquidatable();
     }
 }
