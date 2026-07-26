@@ -172,10 +172,7 @@ Full stack, contract through UI through redeploy:
 
 - **Multi-lender pooling** — the lender-journey doc explicitly describes partial fills across multiple lenders as "still MVP-feasible," not just a stretch goal. Needs: a contribution mapping per loan, a funding-closes-when-full condition, and pro-rata repayment distribution. ~1 day of contract + frontend work. Tracked in scope, not started.
 - **Oracle price-crash liquidation trigger** — the actual design fix, not just wiring: `principalAmount`/`collateralAmount` are both ETH-denominated today, so a price move doesn't change the LTV ratio. Needs either freezing a USD-denominated debt figure at origination, or a non-ETH principal asset (ties into the MockERC20 item below). Not started.
-- **Deployment for team testing + peer discovery** — currently the app only runs on `localhost:3000` for whoever is running `npm run dev`. To let teammates test against the same live Sepolia contracts independently:
-  - Deploy the frontend somewhere reachable (e.g. Vercel) instead of only local dev.
-  - Add a lightweight way for users to find/identify each other on the platform (e.g. a searchable directory of verified users by display name or linked wallet address) so teammates testing together can coordinate borrower/lender pairs instead of guessing loan IDs blind.
-  - Not the current focus — parked here as the next thing after liquidation is done.
+- **Peer discovery** — there's no way for users to find/identify each other on the platform. A searchable directory of verified users (by display name or linked wallet address) would let teammates coordinate borrower/lender pairs instead of guessing loan IDs blind. Not started.
 
 ### Kept intentionally low priority (explicitly requested to stay "at bay")
 
@@ -202,6 +199,20 @@ Full stack, contract through UI through redeploy:
 | BUG-07 | `.toFixed(18)` float noise | Fixed — uses `.toFixed(6)` |
 | BUG-08 | No funding deadline | **Correction (2026-07-25): this was already fixed** — `FUNDING_WINDOW = 7 days` is enforced in `Loan.sol::fund()`. Earlier plan versions listed this as outstanding in error. |
 | BUG-10 | `>= 1` returns Tier A (wrong) | Fixed — correctly returns Tier B |
+
+---
+
+## Deployment (2026-07-26)
+
+The frontend is deployed on **Vercel** so the team can test against the same live Sepolia contracts without each running `npm run dev`.
+
+- **Live URL: https://frontend-gold-chi-89.vercel.app** — this is the public production URL. Use this one.
+- `https://nexusfi-lending.vercel.app` is an alias pointing at the same deployment, but it currently sits behind Vercel's default deployment protection (SSO) and will 302 to a Vercel login. To make it usable, turn off Deployment Protection in the Vercel dashboard (Project → Settings → Deployment Protection). Until then, share the URL above.
+- Vercel project: `afan1/frontend`, root directory `frontend/`, framework auto-detected as Next.js. Linked via `npx vercel link`; deployed via `npx vercel --prod`.
+- All 15 env vars from `frontend/.env.local` are set in Vercel's Production environment (Supabase URL/anon/service-role, Sepolia RPC + the three contract addresses, WalletConnect project ID, the four Didit KYC vars, and `ALLOW_DEMO_KYC=1`). Verified the redeployed LoanFactory address is baked into the production client bundle.
+- **Not deployed:** the FastAPI credit-scoring backend (`backend/`). `/api/credit/score` falls back to the client-side rule-based scorer when it's unreachable, so this is not a blocker — the risk scoring still works, just via the rule-based path.
+- **Redeploying after a code change:** `cd frontend && npx vercel --prod`. The project was created via CLI, so it is **not** wired to auto-deploy on `git push` — connect the GitHub repo in the Vercel dashboard if that's wanted.
+- **Known gap to check before team testing:** if Supabase has "Confirm email" enabled, confirmation links point at Supabase's configured Site URL (likely still `localhost:3000`), which would break signup for anyone not on the dev machine. Either disable email confirmation (Supabase → Authentication → Providers → Email) or add the Vercel URL to Supabase's Site URL / Redirect URLs.
 
 ---
 

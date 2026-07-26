@@ -63,6 +63,10 @@ const TIER_GLOW: Record<string, string> = {
 };
 
 const DURATIONS = [
+  // 1d is a short duration for manually testing the repayment-deadline /
+  // liquidation path on a real network without waiting 7+ days. Keep or
+  // remove once that testing is done — it's genuinely useful for demos too.
+  { days: 1, label: '1d' },
   { days: 7, label: '7d' },
   { days: 14, label: '14d' },
   { days: 30, label: '30d' },
