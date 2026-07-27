@@ -7,7 +7,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface ICollateralVault {
     function releaseCollateral(uint256 loanId, address payable recipient) external;
-    function liquidateCollateral(uint256 loanId, address payable recipient) external;
+    function liquidateCollateral(uint256 loanId, address payable recipient, uint256 seizeAmount) external;
 }
 
 interface ILoanFactory {
@@ -101,7 +101,12 @@ contract Loan is ReentrancyGuard {
         uint256 remainingOwed
     );
     event LoanCancelled(uint256 indexed loanId);
-    event LoanLiquidated(uint256 indexed loanId, address indexed lender);
+    event LoanLiquidated(
+        uint256 indexed loanId,
+        address indexed lender,
+        uint256 seizedAmount,
+        uint256 refundedToBorrower
+    );
     event DemoTimeSkipped(uint256 indexed loanId, address indexed by, uint256 secondsSkipped);
 
     modifier onlyBorrower() {
@@ -256,11 +261,27 @@ contract Loan is ReentrancyGuard {
             "Loan: not liquidatable"
         );
 
+        // Seize only what is actually still owed; the surplus goes back to the
+        // borrower. Both the debt and the collateral are ETH-denominated, so no
+        // oracle conversion is needed to make the lender whole. Partial
+        // repayments therefore shrink the seizure pound for pound.
+        uint256 owed = outstandingBalance();
+        uint256 seizeAmount = owed < collateralAmount ? owed : collateralAmount;
+        uint256 refund = collateralAmount - seizeAmount;
+
         status = LoanStatus.Liquidated;
         closedAt = block.timestamp;
 
-        ICollateralVault(collateralVault).liquidateCollateral(loanId, payable(lender));
-        emit LoanLiquidated(loanId, msg.sender);
+        ICollateralVault(collateralVault).liquidateCollateral(loanId, payable(lender), seizeAmount);
+        emit LoanLiquidated(loanId, msg.sender, seizeAmount, refund);
+    }
+
+    /// What a lender would seize right now, and what the borrower would keep.
+    /// Lets both sides see the split before anyone clicks Liquidate.
+    function liquidationPreview() external view returns (uint256 seizeAmount, uint256 refundAmount) {
+        uint256 owed = outstandingBalance();
+        seizeAmount = owed < collateralAmount ? owed : collateralAmount;
+        refundAmount = collateralAmount - seizeAmount;
     }
 
     // Reads the oracle defensively: a missing or reverting feed yields 0 rather

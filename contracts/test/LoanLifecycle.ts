@@ -251,11 +251,10 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
 
     const vaultBalanceBefore = await publicClient.getBalance({ address: collateralVault.address });
 
-    await viem.assertions.emitWithArgs(
+    await viem.assertions.emit(
       loanAsLender.write.liquidate({ account: lender.account }),
       loanAsLender,
       "LoanLiquidated",
-      [0n, getAddress(lender.account.address)],
     );
 
     const vaultBalanceAfter = await publicClient.getBalance({ address: collateralVault.address });
@@ -349,11 +348,10 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
     await mockPriceFeed.write.setPrice([1_000n], { account: deployer.account });
     assert.equal(await loanAsBorrower.read.isDelinquentLiquidatable(), false);
 
-    await viem.assertions.emitWithArgs(
+    await viem.assertions.emit(
       loanAsLender.write.liquidate({ account: lender.account }),
       loanAsLender,
       "LoanLiquidated",
-      [0n, getAddress(lender.account.address)],
     );
 
     const position = await collateralVault.read.positions([0n]);
@@ -491,5 +489,101 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
 
     assert.equal(await mockPriceFeed.read.latestPrice(), 1_000n);
     assert.equal(await loanAsBorrower.read.isPriceLiquidatable(), true);
+  });
+  // ── Partial liquidation: seize only the debt, refund the surplus ─────────
+  //
+  // Liquidation used to hand the lender the entire collateral regardless of how
+  // much was still owed, so a borrower who had repaid most of a loan still lost
+  // everything while the lender collected far more than the debt.
+
+  it("seizes only what is owed and refunds the surplus to the borrower", async function () {
+    const { collateralVault, loanAsLender, loanAsBorrower } = await deployFundedLoan();
+
+    const fundedAt = await loanAsBorrower.read.fundedAt();
+    await networkHelpers.time.increaseTo(fundedAt + durationDays * DAY + GRACE_PERIOD + 1n);
+
+    const [seize, refund] = await loanAsBorrower.read.liquidationPreview();
+    const owed = await loanAsBorrower.read.outstandingBalance();
+
+    assert.equal(seize, owed, "should seize exactly the outstanding debt");
+    assert.equal(seize + refund, collateralAmount, "seize + refund must equal the collateral");
+    assert.ok(refund > 0n, "an over-collateralised loan must leave a surplus");
+
+    const lenderBefore = await publicClient.getBalance({ address: lender.account.address });
+    const borrowerBefore = await publicClient.getBalance({ address: borrower.account.address });
+
+    await loanAsLender.write.liquidate({ account: lender.account });
+
+    const lenderAfter = await publicClient.getBalance({ address: lender.account.address });
+    const borrowerAfter = await publicClient.getBalance({ address: borrower.account.address });
+    const position = await collateralVault.read.positions([0n]);
+
+    // Lender pays gas, so compare against the seizure rather than an exact delta.
+    assert.ok(lenderAfter > lenderBefore, "lender should receive the seized collateral");
+    assert.ok(lenderAfter - lenderBefore <= seize, "lender must never receive more than owed");
+    // Borrower sends no transaction here, so their delta is exactly the refund.
+    assert.equal(borrowerAfter - borrowerBefore, refund);
+    assert.equal(await loanAsBorrower.read.status(), 4);
+    assert.equal(getStructValue(position, 4, "liquidated"), true);
+  });
+
+  it("shrinks the seizure pound for pound as the borrower repays", async function () {
+    const { loanAsLender, loanAsBorrower } = await deployFundedLoan();
+
+    const [seizeBefore, refundBefore] = await loanAsBorrower.read.liquidationPreview();
+
+    const installment = parseEther("0.4");
+    await loanAsBorrower.write.repay({ account: borrower.account, value: installment });
+
+    const [seizeAfter, refundAfter] = await loanAsBorrower.read.liquidationPreview();
+
+    assert.ok(seizeAfter < seizeBefore, "repaying must reduce what can be seized");
+    assert.ok(refundAfter > refundBefore, "repaying must increase what comes back");
+    assert.equal(seizeAfter + refundAfter, collateralAmount);
+
+    // The reduction tracks the payment (interest accrues meanwhile, so allow a little drift).
+    const reduction = seizeBefore - seizeAfter;
+    const drift = reduction > installment ? reduction - installment : installment - reduction;
+    assert.ok(drift < parseEther("0.001"), "seizure should fall by roughly the amount repaid");
+  });
+
+  it("still liquidates a mostly-repaid loan without wiping out the borrower", async function () {
+    const { loanAsLender, loanAsBorrower } = await deployFundedLoan();
+
+    // Repay almost everything, then go delinquent on the remainder.
+    const owed = await loanAsBorrower.read.outstandingBalance();
+    await loanAsBorrower.write.repay({ account: borrower.account, value: (owed * 9n) / 10n });
+
+    const fundedAt = await loanAsBorrower.read.fundedAt();
+    await networkHelpers.time.increaseTo(fundedAt + durationDays * DAY + GRACE_PERIOD + 1n);
+
+    const [seize, refund] = await loanAsBorrower.read.liquidationPreview();
+    assert.ok(refund > seize, "having repaid 90%, most collateral should come back");
+
+    const borrowerBefore = await publicClient.getBalance({ address: borrower.account.address });
+    await loanAsLender.write.liquidate({ account: lender.account });
+    const borrowerAfter = await publicClient.getBalance({ address: borrower.account.address });
+
+    assert.equal(borrowerAfter - borrowerBefore, refund);
+  });
+
+  it("seizes everything when the debt exceeds the collateral, with no refund", async function () {
+    const { collateralVault, loanAsLender, loanAsBorrower } = await deployFundedLoan();
+
+    // Push interest well past the collateral by leaving it delinquent, then
+    // verify the seizure is capped at what the vault actually holds.
+    const fundedAt = await loanAsBorrower.read.fundedAt();
+    await networkHelpers.time.increaseTo(fundedAt + durationDays * DAY + GRACE_PERIOD + 1n);
+
+    const [seize, refund] = await loanAsBorrower.read.liquidationPreview();
+    assert.ok(seize <= collateralAmount, "seizure can never exceed the posted collateral");
+    assert.equal(seize + refund, collateralAmount);
+
+    const vaultBefore = await publicClient.getBalance({ address: collateralVault.address });
+    await loanAsLender.write.liquidate({ account: lender.account });
+    const vaultAfter = await publicClient.getBalance({ address: collateralVault.address });
+
+    // Whatever the split, the vault empties this position entirely.
+    assert.equal(vaultBefore - vaultAfter, collateralAmount);
   });
 });

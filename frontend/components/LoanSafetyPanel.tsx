@@ -178,10 +178,16 @@ export function LoanSafetyPanel({
                 Nothing seizes the collateral on your behalf.
               </li>
               <li>
-                A crash faster than you react can leave collateral worth less than the debt.
+                Liquidation recovers <span className="font-bold">only what you are owed</span> — the
+                surplus collateral returns to the borrower, so it makes you whole rather than
+                paying out the full deposit.
                 {collateralAtThreshold !== null && (
-                  <> At the threshold it&apos;s worth about {formatUsd(collateralAtThreshold)}.</>
+                  <> At the threshold the collateral is worth about {formatUsd(collateralAtThreshold)}.</>
                 )}
+              </li>
+              <li>
+                A crash faster than you react can still leave the collateral worth less than the
+                debt, in which case you recover only what is there.
               </li>
               <li>
                 The borrower may repay <span className="font-bold">partially</span>, so your capital can

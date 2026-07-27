@@ -152,6 +152,16 @@ export const LOAN_ABI = [
     outputs: [{ name: '', type: 'uint256' }],
     stateMutability: 'view',
   },
+  {
+    name: 'liquidationPreview',
+    type: 'function',
+    inputs: [],
+    outputs: [
+      { name: 'seizeAmount', type: 'uint256' },
+      { name: 'refundAmount', type: 'uint256' },
+    ],
+    stateMutability: 'view',
+  },
   // --- demo helpers (only usable when the factory has demoMode = true) ---
   {
     name: 'fastForward',

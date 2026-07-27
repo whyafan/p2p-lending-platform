@@ -236,6 +236,34 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     query: { enabled: isDelinquentContracts.length > 0, refetchInterval: POLL_MS },
   });
 
+  // Liquidation seizes only the outstanding debt, so the borrower keeps the rest.
+  // Showing this makes clear that every partial payment protects more collateral.
+  const previewContracts = useMemo(
+    () =>
+      myLoanAddresses.map((addr) => ({
+        address: addr,
+        abi: LOAN_ABI,
+        functionName: 'liquidationPreview' as const,
+        chainId,
+      })),
+    [myLoanAddresses, chainId],
+  );
+  const { data: previewResults, refetch: refetchPreview } = useReadContracts({
+    contracts: previewContracts,
+    query: { enabled: previewContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const previewByAddress = useMemo(() => {
+    const map = new Map<string, { seize: bigint; refund: bigint }>();
+    previewContracts.forEach((c, i) => {
+      const r = previewResults?.[i];
+      if (r?.status === 'success') {
+        const [seize, refund] = r.result as readonly [bigint, bigint];
+        map.set(c.address.toLowerCase(), { seize, refund });
+      }
+    });
+    return map;
+  }, [previewContracts, previewResults]);
+
   // Address-keyed maps so result indices never drift from myLoanIndices
   const statusByAddress = useMemo(() => {
     const map = new Map<string, number>();
@@ -274,7 +302,9 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
   }, [isDelinquentContracts, isDelinquentResults]);
 
   async function refetchAll() {
-    await Promise.all([refetchStatus(), refetchOutstanding(), refetchRepaymentDueAt(), refetchIsDelinquent()]);
+    await Promise.all([
+      refetchStatus(), refetchOutstanding(), refetchRepaymentDueAt(), refetchIsDelinquent(), refetchPreview(),
+    ]);
   }
 
   // Combine and sort newest-first
@@ -289,7 +319,8 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         const outstandingVal = loanAddr ? outstandingByAddress.get(loanAddr) : undefined;
         const repaymentDueAtVal = loanAddr ? repaymentDueAtByAddress.get(loanAddr) : undefined;
         const isDelinquentVal = loanAddr ? isDelinquentByAddress.get(loanAddr) : undefined;
-        return { id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal };
+        const previewVal = loanAddr ? previewByAddress.get(loanAddr) : undefined;
+        return { id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal };
       })
       .sort((a, b) => Number(b.terms.createdAt) - Number(a.terms.createdAt));
   }, [
@@ -300,6 +331,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     outstandingByAddress,
     repaymentDueAtByAddress,
     isDelinquentByAddress,
+    previewByAddress,
   ]);
 
   const pendingCount = myLoans.filter((l) => l.statusVal === 0).length;
@@ -406,7 +438,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         </div>
       ) : (
         <div className="space-y-3">
-          {loansWithTx.map(({ id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, txHash }) => {
+          {loansWithTx.map(({ id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal, txHash }) => {
             const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
             const aprNum = Number(terms.interestBps) / 100;
             const principalEth = parseFloat(formatEther(terms.principalAmount));
@@ -600,6 +632,19 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                     </div>
                     <p className="text-[10px] text-slate-700 mt-1.5">
                       Partial payments are fine — pay what you can now and the rest later, before the deadline.
+                      {previewVal && (
+                        <>
+                          {' '}If this were liquidated right now the lender would take{' '}
+                          <span className="font-mono text-amber-500/80">
+                            {parseFloat(formatEther(previewVal.seize)).toFixed(6)} ETH
+                          </span>{' '}
+                          and you would keep{' '}
+                          <span className="font-mono text-emerald-500/80">
+                            {parseFloat(formatEther(previewVal.refund)).toFixed(6)} ETH
+                          </span>{' '}
+                          — every payment you make shrinks the first number.
+                        </>
+                      )}
                     </p>
 
                     {isRepayingThis && repayHash && (

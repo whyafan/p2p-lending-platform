@@ -3,8 +3,10 @@
 Living checklist for manually testing the deployed app against live Sepolia contracts.
 Automated contract tests live in `contracts/test/` (`npx hardhat test`, 12 passing) — this file covers what those can't: the real UI, real wallets, two real people.
 
-> **Status: not yet executed.** Written 2026-07-26, to be run as a full pass later.
-> Tick boxes as you go and note anything odd at the bottom.
+> **Status: session 1 (2026-07-26) partially run, then stopped.** A loan was created, funded,
+> and time-skipped to liquidation — which exposed several real bugs (see Findings). Those are
+> fixed and the contracts were redeployed, so **all earlier loans are gone and testing restarts
+> from scratch.** Tick boxes as you go and fill in the findings table.
 
 ---
 
@@ -28,10 +30,10 @@ All four URLs share the **same Sepolia contracts and the same Supabase database*
 - [ ] Both passed KYC via the demo bypass (`ALLOW_DEMO_KYC=1` is on — no real ID needed)
 - [ ] Network toggle set to **testnet** on both
 
-**Deployed contracts under test** (redeployed 2026-07-26 with demo controls):
-- LoanFactory `0xf34505b3939374f8Cd71BE5D21c424c642c210d0`
-- CollateralVault `0x0C0B2aa539Cbe0c3c93559508c46d0934fAbbf1f`
-- MockPriceFeed `0x39d857c414585C5aAef96Ca82Ea5C5F671F381Cb`
+**Deployed contracts under test** (redeployed 2026-07-26, partial liquidation):
+- LoanFactory `0x4dDB469155A8824FDCa64d2e706aFE6380C55fAd`
+- CollateralVault `0xeB137a592E5623D2750CEcf4Ad8421E2aA8FDf16`
+- MockPriceFeed `0x5094c61F27B8b7538eeC330f9Ec013277E590a7c`
 
 > **Demo controls: `/demo`** (e.g. <https://nexusfi-afan.vercel.app/demo>) — not linked from the nav.
 > Set any ETH price, and skip a loan's clock past its deadline/grace period. This makes Track B
@@ -59,6 +61,23 @@ Any duration works here; nothing depends on deadlines. Use small amounts (≥0.0
 - [ ] Borrower tries to fund their **own** loan → blocked in UI ("Your request")
 - [ ] Cancel an already-**funded** loan → not possible (cancel is pre-funding only)
 - [ ] Create two loans back-to-back quickly → distinct IDs, no cross-contaminated state *(brushes BUG-11 and BUG-VIS — just note anything weird, don't chase it)*
+
+---
+
+## Track E — Partial liquidation fairness (new, do after A)
+
+Liquidation seizes only the outstanding debt and refunds the surplus, so partial repayments
+genuinely protect the borrower. Both dashboards show the split before anyone clicks.
+
+- [ ] **E1** — Create + fund a loan. On the borrower's repay box, note the "if liquidated now"
+      split; on the lender's card, note what Liquidate says it would recover
+- [ ] **E2** — Borrower makes a partial repayment. Verify the **seize figure falls** by roughly
+      that amount and the **refund figure rises** on both sides
+- [ ] **E3** — Repay most of the loan, then `/demo` → Skip time past grace, and liquidate.
+      Verify the lender receives only what was still owed and the **borrower gets the rest back**
+      (check both wallet balances, not just the UI)
+- [ ] **E4** — On a separate loan with **no** repayments, liquidate and confirm the lender still
+      only recovers the debt, not the full collateral
 
 ---
 

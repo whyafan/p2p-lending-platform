@@ -270,6 +270,31 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     query: { enabled: delinqLiqContracts.length > 0, refetchInterval: POLL_MS },
   });
 
+  // What liquidating right now would actually take vs. hand back. Liquidation
+  // seizes only the outstanding debt, so this is not simply "all the collateral".
+  const previewContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'liquidationPreview' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: previewResults, refetch: refetchPreview } = useReadContracts({
+    contracts: previewContracts,
+    query: { enabled: previewContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const previewByAddress = useMemo(() => {
+    const map = new Map<string, { seize: bigint; refund: bigint }>();
+    previewContracts.forEach((c, i) => {
+      const r = previewResults?.[i];
+      if (r?.status === 'success') {
+        const [seize, refund] = r.result as readonly [bigint, bigint];
+        map.set(c.address.toLowerCase(), { seize, refund });
+      }
+    });
+    return map;
+  }, [previewContracts, previewResults]);
+
   const { data: repaymentDueAtResults, refetch: refetchRepaymentDueAt } = useReadContracts({
     contracts: repaymentDueAtContracts,
     query: { enabled: repaymentDueAtContracts.length > 0, refetchInterval: POLL_MS },
@@ -372,6 +397,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       refetchLtv(),
       refetchPriceLiq(),
       refetchDelinqLiq(),
+      refetchPreview(),
     ]);
   }
 
@@ -408,14 +434,15 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const ltvBpsVal = loanAddr !== undefined ? ltvByAddress.get(loanAddr) : undefined;
       const priceLiqVal = loanAddr !== undefined ? priceLiqByAddress.get(loanAddr) : undefined;
       const delinqLiqVal = loanAddr !== undefined ? delinqLiqByAddress.get(loanAddr) : undefined;
+      const previewVal = loanAddr !== undefined ? previewByAddress.get(loanAddr) : undefined;
       return {
         id, terms, statusVal, lenderAddr, isLiquidatableVal, repaymentDueAtVal,
-        ltvBpsVal, priceLiqVal, delinqLiqVal,
+        ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal,
       };
     });
   }, [
     loanIds, termsResults, statusByAddress, lenderByAddress, isLiquidatableByAddress,
-    repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress,
+    repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress, previewByAddress,
   ]);
 
   const openLoans = useMemo(
@@ -837,7 +864,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             </div>
           ) : (
             <div className="space-y-3">
-              {myPositions.map(({ id, terms, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal }) => {
+              {myPositions.map(({ id, terms, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -1022,7 +1049,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       </button>
                       <span className="text-[10px] text-slate-700">
                         {canLiquidate
-                          ? 'Borrower is delinquent — seizes collateral, no further checks.'
+                          ? previewVal
+                            ? `Recovers ${parseFloat(formatEther(previewVal.seize)).toFixed(6)} ETH (what you're owed). The remaining ${parseFloat(formatEther(previewVal.refund)).toFixed(6)} ETH goes back to the borrower.`
+                            : 'Recovers only what you are owed; the surplus returns to the borrower.'
                           : countdown ?? 'Not yet liquidatable.'}
                       </span>
                     </div>

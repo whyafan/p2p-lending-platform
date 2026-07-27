@@ -88,7 +88,14 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         emit CollateralReleased(loanId, recipient, amount);
     }
 
-    function liquidateCollateral(uint256 loanId, address payable recipient)
+    /// @notice Seize `seizeAmount` for the lender and return the rest to the borrower.
+    /// @dev Liquidation used to hand the lender the *entire* collateral no matter
+    ///      how much was still owed, so a borrower who had repaid 90% still lost
+    ///      everything and the lender collected far more than the debt. The Loan
+    ///      contract now passes exactly what covers the outstanding balance and
+    ///      whatever is left over goes back to the borrower in the same call.
+    ///      Still one-shot: the position closes here, it is not drawn down twice.
+    function liquidateCollateral(uint256 loanId, address payable recipient, uint256 seizeAmount)
         external
         onlyLoan(loanId)
         nonReentrant
@@ -99,11 +106,25 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         require(!position.liquidated, "CollateralVault: already liquidated");
         require(recipient != address(0), "CollateralVault: recipient is zero address");
 
-        uint256 amount = position.amount;
+        uint256 total = position.amount;
+        require(seizeAmount <= total, "CollateralVault: seize exceeds collateral");
+
+        address payable borrower = payable(position.borrower);
+        uint256 refund = total - seizeAmount;
+
         position.liquidated = true;
         position.amount = 0;
 
-        recipient.sendValue(amount);
-        emit CollateralLiquidated(loanId, recipient, amount);
+        if (seizeAmount > 0) {
+            recipient.sendValue(seizeAmount);
+        }
+        if (refund > 0) {
+            borrower.sendValue(refund);
+        }
+
+        emit CollateralLiquidated(loanId, recipient, seizeAmount);
+        if (refund > 0) {
+            emit CollateralReleased(loanId, borrower, refund);
+        }
     }
 }

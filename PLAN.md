@@ -79,9 +79,9 @@ Every step (create, fund, repay — partial or full, cancel, liquidate, set mock
 
 Deployed contracts (redeployed 2026-07-26, twice — first for the price feed, then for the demo controls; earlier addresses are abandoned):
 
-- LoanFactory: `0xf34505b3939374f8Cd71BE5D21c424c642c210d0`
-- CollateralVault: `0x0C0B2aa539Cbe0c3c93559508c46d0934fAbbf1f`
-- MockPriceFeed: `0x39d857c414585C5aAef96Ca82Ea5C5F671F381Cb`
+- LoanFactory: `0x4dDB469155A8824FDCa64d2e706aFE6380C55fAd`
+- CollateralVault: `0xeB137a592E5623D2750CEcf4Ad8421E2aA8FDf16`
+- MockPriceFeed: `0x5094c61F27B8b7538eeC330f9Ec013277E590a7c`
 
 All three are populated in `frontend/.env.local`.
 
@@ -216,7 +216,6 @@ Something independent of the test findings, so a bug discovered in testing doesn
 ### In scope for the project (confirmed by official docs)
 
 - **Multi-lender pooling** — the lender-journey doc explicitly describes partial fills across multiple lenders as "still MVP-feasible," not just a stretch goal. Needs: a contribution mapping per loan, a funding-closes-when-full condition, and pro-rata repayment distribution. ~1 day of contract + frontend work. Tracked in scope, not started.
-- **Partial liquidation** — liquidation currently seizes all collateral rather than just enough to cover the debt. Needs `CollateralVault` changes too (its release/liquidate are one-shot, no amount parameter). Not started.
 - **Peer discovery** — there's no way for users to find/identify each other on the platform. A searchable directory of verified users (by display name or linked wallet address) would let teammates coordinate borrower/lender pairs instead of guessing loan IDs blind. Not started.
 
 ### Kept intentionally low priority
@@ -272,6 +271,23 @@ Push to any of those branches → that branch's URL rebuilds automatically. No C
 ### Known gap to check before team testing
 
 If Supabase has "Confirm email" enabled, confirmation links point at Supabase's configured Site URL (likely still `localhost:3000`), which would break signup for anyone not on the dev machine. Either disable email confirmation (Supabase → Authentication → Providers → Email) or add the deployed URLs to Supabase's Site URL / Redirect URLs.
+
+---
+
+## Partial liquidation — seize the debt, refund the surplus (2026-07-26)
+
+Found during the first two-person manual test. Liquidation handed the lender the **entire** collateral no matter how much was still owed, so two things were wrong at once:
+
+1. A borrower who had repaid 90% still lost 100% of their collateral, on top of what they had already paid.
+2. Even at zero repayment the lender collected far more than the debt — roughly 1.75x on a typical over-collateralised loan — which is a windfall, not being made whole.
+
+`liquidate()` now seizes `min(outstandingBalance, collateralAmount)` and returns the remainder to the borrower in the same transaction. Both debt and collateral are ETH-denominated, so no oracle conversion is needed for the lender to come out exactly whole. Partial repayments now shrink the seizure pound for pound, which is what makes paying something worthwhile.
+
+- `CollateralVault.liquidateCollateral()` takes a `seizeAmount` and pays the surplus back to the borrower. Still one-shot — the position closes in a single call, it is not drawn down repeatedly.
+- `Loan.liquidationPreview()` returns `(seizeAmount, refundAmount)` so both sides can see the split *before* anyone clicks Liquidate. The lender's button says what it will recover; the borrower's repay box says what they would keep.
+- 4 new tests: exact seizure with surplus refunded, seizure shrinking as repayments land, a mostly-repaid loan surviving liquidation with most collateral returned, and the seizure capped at the posted collateral when the debt exceeds it. 28/28 passing.
+
+**Still not automatic.** Contracts cannot self-execute; real protocols pay liquidator bots a bonus to race for it (or use a keeper network like Chainlink Automation). Ours relies on the lender clicking. Partial liquidation fixes *fairness*, not *timeliness* — if collateral fell below the debt while nobody acted, the lender would still absorb the shortfall. Acceptable for an over-collateralised MVP; worth stating plainly in the report.
 
 ---
 
