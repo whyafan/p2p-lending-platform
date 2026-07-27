@@ -47,7 +47,23 @@ function AuthStateSync() {
 
 export function Providers({ children, initialState }: ProvidersProps) {
   const [config] = useState(() => getConfig());
-  const [queryClient] = useState(() => new QueryClient());
+  // Chain state is shared between two people in real time — a borrower repays and
+  // the lender must see it without hitting reload. React Query pauses polling for
+  // unfocused tabs by default, which is precisely the two-window case, so keep it
+  // running in the background and refetch the moment a tab regains focus.
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            refetchIntervalInBackground: true,
+            refetchOnWindowFocus: true,
+            staleTime: 0,
+            retry: 1,
+          },
+        },
+      }),
+  );
 
   return (
     <WagmiProvider config={config} initialState={initialState}>

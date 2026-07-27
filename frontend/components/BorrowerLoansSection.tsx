@@ -17,6 +17,10 @@ import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
 import { Hexagon, Check, AlertTriangle } from 'lucide-react';
 
 export const MAX_OPEN_REQUESTS = 3;
+// Both sides of a loan watch each other act, so poll briskly rather than
+// every 15-30s. Handfuls of loans on Sepolia — the RPC cost is trivial.
+const POLL_MS = 5_000;
+
 const FUNDING_WINDOW_SECS = 7 * 24 * 60 * 60;
 
 const STATUS_LABEL = ['Requested', 'Funded', 'Repaid', 'Cancelled', 'Liquidated'] as const;
@@ -127,7 +131,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     abi: FACTORY_ABI,
     functionName: 'getLoanIds',
     chainId,
-    query: { refetchInterval: 15_000 },
+    query: { refetchInterval: POLL_MS },
   });
 
   // Round 2: terms for every ID
@@ -145,7 +149,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
 
   const { data: termsResults, isLoading: termsLoading } = useReadContracts({
     contracts: termsContracts,
-    query: { enabled: termsContracts.length > 0, refetchInterval: 15_000 },
+    query: { enabled: termsContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   // Indices of loans that belong to this borrower
@@ -183,7 +187,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
 
   const { data: statusResults, refetch: refetchStatus } = useReadContracts({
     contracts: statusContracts,
-    query: { enabled: statusContracts.length > 0, refetchInterval: 15_000 },
+    query: { enabled: statusContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   // Round 4: live repayment state — read for all of the borrower's loans; only
@@ -221,15 +225,15 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
 
   const { data: outstandingResults, refetch: refetchOutstanding } = useReadContracts({
     contracts: outstandingContracts,
-    query: { enabled: outstandingContracts.length > 0, refetchInterval: 15_000 },
+    query: { enabled: outstandingContracts.length > 0, refetchInterval: POLL_MS },
   });
   const { data: repaymentDueAtResults, refetch: refetchRepaymentDueAt } = useReadContracts({
     contracts: repaymentDueAtContracts,
-    query: { enabled: repaymentDueAtContracts.length > 0, refetchInterval: 30_000 },
+    query: { enabled: repaymentDueAtContracts.length > 0, refetchInterval: POLL_MS },
   });
   const { data: isDelinquentResults, refetch: refetchIsDelinquent } = useReadContracts({
     contracts: isDelinquentContracts,
-    query: { enabled: isDelinquentContracts.length > 0, refetchInterval: 15_000 },
+    query: { enabled: isDelinquentContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   // Address-keyed maps so result indices never drift from myLoanIndices

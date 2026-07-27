@@ -28,6 +28,10 @@ type StoredAssessment = {
 };
 import { ClipboardList, TrendingUp, Check, Hexagon, AlertTriangle } from 'lucide-react';
 
+// Both sides of a loan watch each other act, so poll briskly rather than
+// every 15-30s. Handfuls of loans on Sepolia — the RPC cost is trivial.
+const POLL_MS = 5_000;
+
 const FUNDING_WINDOW_SECS = 7 * 24 * 60 * 60;
 // Mirrors Loan.sol's GRACE_PERIOD constant, for client-side countdown display only —
 // the contract's isLiquidatable() is always the source of truth for the actual gate.
@@ -126,7 +130,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     abi: FACTORY_ABI,
     functionName: 'getLoanIds',
     chainId,
-    query: { refetchInterval: 30_000 },
+    query: { refetchInterval: POLL_MS },
   });
 
   // ── Round 2: read LoanTerms for each ID ──
@@ -144,7 +148,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
 
   const { data: termsResults, isLoading: termsLoading } = useReadContracts({
     contracts: termsContracts,
-    query: { enabled: termsContracts.length > 0, refetchInterval: 30_000 },
+    query: { enabled: termsContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   // ── Round 3: read status + lender for each loan contract ──
@@ -184,12 +188,12 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
 
   const { data: statusResults, refetch: refetchStatus } = useReadContracts({
     contracts: statusContracts,
-    query: { enabled: statusContracts.length > 0, refetchInterval: 30_000 },
+    query: { enabled: statusContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   const { data: lenderResults, refetch: refetchLenders } = useReadContracts({
     contracts: lenderContracts,
-    query: { enabled: lenderContracts.length > 0, refetchInterval: 30_000 },
+    query: { enabled: lenderContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   // ── Round 4: real delinquency/liquidation state for funded loans only ──
@@ -248,27 +252,27 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
 
   const { data: isLiquidatableResults, refetch: refetchIsLiquidatable } = useReadContracts({
     contracts: isLiquidatableContracts,
-    query: { enabled: isLiquidatableContracts.length > 0, refetchInterval: 15_000 },
+    query: { enabled: isLiquidatableContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   const { data: ltvResults, refetch: refetchLtv } = useReadContracts({
     contracts: ltvContracts,
-    query: { enabled: ltvContracts.length > 0, refetchInterval: 15_000 },
+    query: { enabled: ltvContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   const { data: priceLiqResults, refetch: refetchPriceLiq } = useReadContracts({
     contracts: priceLiqContracts,
-    query: { enabled: priceLiqContracts.length > 0, refetchInterval: 15_000 },
+    query: { enabled: priceLiqContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   const { data: delinqLiqResults, refetch: refetchDelinqLiq } = useReadContracts({
     contracts: delinqLiqContracts,
-    query: { enabled: delinqLiqContracts.length > 0, refetchInterval: 15_000 },
+    query: { enabled: delinqLiqContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   const { data: repaymentDueAtResults, refetch: refetchRepaymentDueAt } = useReadContracts({
     contracts: repaymentDueAtContracts,
-    query: { enabled: repaymentDueAtContracts.length > 0, refetchInterval: 30_000 },
+    query: { enabled: repaymentDueAtContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   // Address-keyed maps so statusResults/lenderResults indices never drift from loanIds indices
@@ -417,6 +421,20 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
   const openLoans = useMemo(
     () => loans.filter((l) => l.statusVal === 0 && l.terms && !isExpired(l.terms.createdAt)),
     [loans],
+  );
+
+  const isMine = (lenderAddr: string | undefined) =>
+    lenderAddr !== undefined &&
+    (allAddresses.length > 0
+      ? allAddresses.includes(lenderAddr.toLowerCase())
+      : lenderAddr.toLowerCase() === address?.toLowerCase());
+
+  // Settled loans (Repaid / Liquidated) the user funded. Previously these were
+  // filtered out entirely, so the moment a borrower repaid, the lender's position
+  // vanished with no trace that it had ever existed or been paid back.
+  const settledPositions = useMemo(
+    () => loans.filter((l) => (l.statusVal === 2 || l.statusVal === 4) && isMine(l.lenderAddr)),
+    [loans, allAddresses, address], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const myPositions = useMemo(
@@ -1024,6 +1042,53 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Settled positions — keeps the record after a loan closes */}
+          {settledPositions.length > 0 && (
+            <div className="mt-6">
+              <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-2">
+                Completed ({settledPositions.length})
+              </p>
+              <div className="space-y-2">
+                {settledPositions.map(({ id, terms, statusVal }) => {
+                  if (!terms) return null;
+                  const repaid = statusVal === 2;
+                  const principalEth = parseFloat(formatEther(terms.principalAmount));
+                  const collateralEth = parseFloat(formatEther(terms.collateralAmount));
+                  return (
+                    <div
+                      key={id.toString()}
+                      className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3 flex flex-wrap items-center gap-3"
+                    >
+                      <span className="text-[10px] font-mono text-slate-600">#{id.toString()}</span>
+                      <span
+                        className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${
+                          repaid ? STATUS_COLORS[2] : STATUS_COLORS[4]
+                        }`}
+                      >
+                        {repaid ? 'Repaid' : 'Liquidated'}
+                      </span>
+                      <span className="text-[11px] text-slate-500">
+                        {repaid ? (
+                          <>Borrower repaid — you received your {principalEth.toFixed(4)} ETH plus interest.</>
+                        ) : (
+                          <>You seized {collateralEth.toFixed(4)} ETH of collateral.</>
+                        )}
+                      </span>
+                      <a
+                        href={`https://sepolia.etherscan.io/address/${terms.loanContract}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="ml-auto text-[10px] font-mono text-blue-500/60 hover:text-blue-400"
+                      >
+                        Contract ↗
+                      </a>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </>

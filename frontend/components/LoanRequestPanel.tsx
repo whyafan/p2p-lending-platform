@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useEffect } from 'react';
-import { useWriteContract, useWaitForTransactionReceipt, useAccount, useBalance, useSwitchChain } from 'wagmi';
+import { useWriteContract, useWaitForTransactionReceipt, useAccount, useBalance, useSwitchChain, useReadContract } from 'wagmi';
 import { decodeEventLog } from 'viem';
 import { parseEther } from 'viem';
 import { sepolia, hardhat } from 'wagmi/chains';
@@ -31,6 +31,10 @@ type EvalMode = 'persona' | 'wallet';
 
 // Max collateral we'll actually send on-chain for any demo tx (keeps Sepolia cost near-zero)
 const DEMO_MAX_COLLATERAL_ETH = 0.005;
+
+const LOAN_STATUS_ABI = [
+  { name: 'status', type: 'function', inputs: [], outputs: [{ name: '', type: 'uint8' }], stateMutability: 'view' },
+] as const;
 
 const LOAN_FACTORY_ABI = [
   {
@@ -454,6 +458,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   // Best-effort: a failure here must never disrupt the borrower's flow — the
   // loan itself is already safely on-chain.
   const [riskSaved, setRiskSaved] = useState(false);
+  const [createdLoanContract, setCreatedLoanContract] = useState<`0x${string}` | undefined>(undefined);
   useEffect(() => {
     if (!isConfirmed || !txReceipt || !riskExpl || riskSaved) return;
 
@@ -474,6 +479,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
       }
     }
     if (!loanContract) return;
+    setCreatedLoanContract(loanContract as `0x${string}`);
 
     setRiskSaved(true);
     void fetch('/api/loans/risk', {
@@ -491,6 +497,17 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
       }),
     }).catch((err) => console.error('[risk-persist]', err));
   }, [isConfirmed, txReceipt, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona]);
+
+  // "What happens next" used to be a static list with `done` hardcoded, so it
+  // never moved past step 1 no matter what happened on-chain. Follow the real
+  // loan status instead.
+  const { data: createdLoanStatus } = useReadContract({
+    address: createdLoanContract,
+    abi: LOAN_STATUS_ABI,
+    functionName: 'status',
+    chainId,
+    query: { enabled: Boolean(createdLoanContract), refetchInterval: 5_000 },
+  });
 
   const factoryAddress =
     networkMode === 'testnet'
@@ -1180,13 +1197,19 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                   <div className="rounded-xl border border-slate-700 bg-slate-900/30 p-4">
                     <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-4">What happens next</p>
                     <ol className="space-y-3">
-                      {[
-                        { Icon: Check, done: true,  label: 'Loan contract deployed',            desc: `CollateralVault holds your ${demoTxAmounts.actualCollateral.toFixed(6)} ETH` },
-                        { Icon: Clock, done: false, label: 'Awaiting a lender (up to 7 days)', desc: `Lender sends ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH to fund your request` },
-                        { Icon: Check, done: false, label: 'You receive the principal',          desc: `${demoTxAmounts.actualPrincipal.toFixed(6)} ETH sent to your wallet` },
-                        { Icon: ShieldCheck, done: false, label: 'Repay to unlock collateral',  desc: `Repay within ${tenorDays} days to get your ETH back` },
-                        { Icon: Check, done: false, label: 'Collateral returned',               desc: `Your ${demoTxAmounts.actualCollateral.toFixed(6)} ETH released from vault` },
-                      ].map(({ Icon, done, label, desc }) => (
+                      {(() => {
+                        const st = createdLoanStatus === undefined ? 0 : Number(createdLoanStatus);
+                        const funded = st >= 1 && st !== 3;
+                        const closed = st === 2;
+                        const liquidated = st === 4;
+                        return [
+                          { Icon: Check, done: true, label: 'Loan contract deployed', desc: `CollateralVault holds your ${demoTxAmounts.actualCollateral.toFixed(6)} ETH` },
+                          { Icon: funded ? Check : Clock, done: funded, label: funded ? 'Lender funded your request' : 'Awaiting a lender (up to 7 days)', desc: `Lender sends ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH to fund your request` },
+                          { Icon: Check, done: funded, label: 'You receive the principal', desc: `${demoTxAmounts.actualPrincipal.toFixed(6)} ETH sent to your wallet` },
+                          { Icon: ShieldCheck, done: closed, label: 'Repay to unlock collateral', desc: liquidated ? 'Loan was liquidated — collateral went to the lender' : `Repay within ${tenorDays} days to get your ETH back` },
+                          { Icon: Check, done: closed, label: 'Collateral returned', desc: `Your ${demoTxAmounts.actualCollateral.toFixed(6)} ETH released from vault` },
+                        ];
+                      })().map(({ Icon, done, label, desc }) => (
                         <li key={label} className="flex items-start gap-3">
                           <span className={`flex-shrink-0 flex h-6 w-6 items-center justify-center rounded-full ${done ? 'bg-emerald-500 text-slate-950' : 'border border-slate-700 text-slate-500'}`}>
                             <Icon className="h-3.5 w-3.5" />
