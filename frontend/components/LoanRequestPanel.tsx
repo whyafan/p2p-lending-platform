@@ -459,10 +459,14 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   // loan itself is already safely on-chain.
   const [riskSaved, setRiskSaved] = useState(false);
   const [createdLoanContract, setCreatedLoanContract] = useState<`0x${string}` | undefined>(undefined);
-  useEffect(() => {
-    if (!isConfirmed || !txReceipt || !riskExpl || riskSaved) return;
 
-    let loanContract: string | undefined;
+  // Decode the new Loan address from the receipt. Kept SEPARATE from the risk
+  // save below: these were previously one effect gated on `riskExpl`, so a
+  // missing assessment meant the address was never decoded, which in turn left
+  // the "What happens next" timeline frozen on step 1 forever.
+  useEffect(() => {
+    if (!isConfirmed || !txReceipt || createdLoanContract) return;
+
     for (const log of txReceipt.logs) {
       try {
         const decoded = decodeEventLog({
@@ -471,22 +475,27 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
           topics: log.topics,
         });
         if (decoded.eventName === 'LoanCreated') {
-          loanContract = (decoded.args as { loanContract: string }).loanContract;
-          break;
+          setCreatedLoanContract((decoded.args as { loanContract: `0x${string}` }).loanContract);
+          return;
         }
       } catch {
         // Not a LoanCreated log (the vault emits its own) — keep looking.
       }
     }
-    if (!loanContract) return;
-    setCreatedLoanContract(loanContract as `0x${string}`);
+  }, [isConfirmed, txReceipt, createdLoanContract]);
+
+  // Persist the risk explanation once we know which loan it belongs to.
+  // Best-effort: a failure here must never disrupt the borrower's flow — the
+  // loan itself is already safely on-chain.
+  useEffect(() => {
+    if (!createdLoanContract || !riskExpl || riskSaved) return;
 
     setRiskSaved(true);
     void fetch('/api/loans/risk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        loanContract,
+        loanContract: createdLoanContract,
         chainId,
         borrowerWallet: address,
         tier: riskExpl.tier,
@@ -496,7 +505,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
         personaId: selectedPersona?.id ?? null,
       }),
     }).catch((err) => console.error('[risk-persist]', err));
-  }, [isConfirmed, txReceipt, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona]);
+  }, [createdLoanContract, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona]);
 
   // "What happens next" used to be a static list with `done` hardcoded, so it
   // never moved past step 1 no matter what happened on-chain. Follow the real
@@ -665,6 +674,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     setTxError(null);
     setSubmittedHash(undefined);
     setRiskSaved(false);
+    setCreatedLoanContract(undefined);
     onTierChange?.(null, null);
     onPersonaChange?.(null);
   }

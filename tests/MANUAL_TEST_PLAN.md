@@ -173,6 +173,10 @@ npx hardhat verify --build-profile production --network sepolia <address> [ctorA
 
 | Date | Track/step | What happened | Expected | Severity |
 |---|---|---|---|---|
+| 07-26 | A (repay) | Both users had to refresh constantly; lender's position vanished after repayment | Live updates; settled loans retained | **Fixed** — polling paused on unfocused tabs, and positions filtered to Funded only |
+| 07-26 | B (liquidation) | Liquidation seized the entire collateral regardless of how much was repaid | Seize only the debt | **Fixed** — partial liquidation, surplus refunded |
+| 07-26 | A (create) | "What happens next" never advanced past step 1 | Follows real loan status | **Fixed twice** — first the steps were hardcoded, then the loan address decode was gated behind the risk assessment |
+| 07-28 | D (price crash) | Crashed ETH to \$500; lender received exactly the principal + interest, not the whole collateral | Correct — this is the intended partial-liquidation behaviour | Not a bug |
 | | | | | |
 
 ---
