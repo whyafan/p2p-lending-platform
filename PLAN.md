@@ -293,6 +293,24 @@ Found during the first two-person manual test. Liquidation handed the lender the
 
 ---
 
+## Transparency pass — both sides can see the money (2026-07-28)
+
+Session 2 surfaced confusion that turned out to be mostly invisible-but-correct behaviour, so the fix was to expose it rather than change it:
+
+- **Lender position card** now shows *still owed to you*, *repaid so far*, and *if you liquidated now* (seize vs. refund), plus the explicit price this loan liquidates below.
+- **Borrower repay box** now breaks out interest accrued so far, and shows the same liquidation price.
+- Both note that payments arrive as **internal contract transfers**, so balances move but MetaMask's activity list stays empty — the single biggest source of "did anything happen?" during testing.
+
+Three things that looked like bugs and were not:
+
+1. **"No interest."** Interest accrues by elapsed time. 15% APR on 0.00225 ETH over 90 days is ~0.000083 ETH total; repaying minutes after funding earns a few hundred wei. Correct, just invisible at demo scale.
+2. **"Crashing to \$500 doesn't enable liquidation."** The debt is frozen in USD *at funding*. The loan in question had `priceAtFunding = 500` — it was funded *after* the crash, so \$500 was already the baseline and LTV sat at 45% against a 65% threshold. It needed roughly \$346 to trigger.
+3. **"The lender took the whole collateral."** On-chain the latest loan seized 0.001085 ETH and refunded 0.003915 ETH to the borrower — partial liquidation working exactly as intended. The refund was invisible because it arrived as an internal transfer.
+
+The genuinely stale observations came from loans still sitting on the **previous factory** (`0xf345…`), which predates partial liquidation and does take everything.
+
+---
+
 ## Lender-facing ML explainability (2026-07-26)
 
 The borrower's 8-feature risk score was computed in the browser and discarded on unmount — only the tier survived, baked into the on-chain terms. Lenders therefore saw a letter grade with no reasoning, which is precisely the "ledger transparency is not decision transparency" gap the literature review calls out. Now persisted and surfaced.

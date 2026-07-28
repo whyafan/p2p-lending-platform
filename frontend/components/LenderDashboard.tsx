@@ -272,6 +272,45 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
 
   // What liquidating right now would actually take vs. hand back. Liquidation
   // seizes only the outstanding debt, so this is not simply "all the collateral".
+  const outstandingContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'outstandingBalance' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const priceAtFundingContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'priceAtFunding' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: outstandingResults, refetch: refetchOutstanding } = useReadContracts({
+    contracts: outstandingContracts,
+    query: { enabled: outstandingContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const { data: priceAtFundingResults, refetch: refetchPriceAtFunding } = useReadContracts({
+    contracts: priceAtFundingContracts,
+    query: { enabled: priceAtFundingContracts.length > 0, refetchInterval: 60_000 },
+  });
+  const outstandingByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    outstandingContracts.forEach((c, i) => {
+      const r = outstandingResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [outstandingContracts, outstandingResults]);
+  const priceAtFundingByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    priceAtFundingContracts.forEach((c, i) => {
+      const r = priceAtFundingResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [priceAtFundingContracts, priceAtFundingResults]);
+
   const previewContracts = useMemo(
     () =>
       loanContractAddresses
@@ -398,6 +437,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       refetchPriceLiq(),
       refetchDelinqLiq(),
       refetchPreview(),
+      refetchOutstanding(),
+      refetchPriceAtFunding(),
     ]);
   }
 
@@ -435,14 +476,16 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const priceLiqVal = loanAddr !== undefined ? priceLiqByAddress.get(loanAddr) : undefined;
       const delinqLiqVal = loanAddr !== undefined ? delinqLiqByAddress.get(loanAddr) : undefined;
       const previewVal = loanAddr !== undefined ? previewByAddress.get(loanAddr) : undefined;
+      const outstandingVal = loanAddr !== undefined ? outstandingByAddress.get(loanAddr) : undefined;
+      const priceAtFundingVal = loanAddr !== undefined ? priceAtFundingByAddress.get(loanAddr) : undefined;
       return {
         id, terms, statusVal, lenderAddr, isLiquidatableVal, repaymentDueAtVal,
-        ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal,
+        ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal,
       };
     });
   }, [
     loanIds, termsResults, statusByAddress, lenderByAddress, isLiquidatableByAddress,
-    repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress, previewByAddress,
+    repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress, previewByAddress, outstandingByAddress, priceAtFundingByAddress,
   ]);
 
   const openLoans = useMemo(
@@ -864,7 +907,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             </div>
           ) : (
             <div className="space-y-3">
-              {myPositions.map(({ id, terms, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal }) => {
+              {myPositions.map(({ id, terms, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -901,6 +944,30 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                   ? 'overdue'
                   : null;
                 const countdown = liquidationCountdown(repaymentDueAtVal);
+
+                // The debt is frozen in USD at FUNDING, so what matters is the price
+                // relative to that, not to $2,000. Crashing to the same price you
+                // funded at changes nothing — this makes the real trigger explicit.
+                const thresholdFrac =
+                  (Number(terms.maxLtvBps) + Number(terms.liquidationBufferBps)) / 10_000;
+                const fundingPrice = priceAtFundingVal ? Number(priceAtFundingVal) : null;
+                const liqPriceUsd =
+                  fundingPrice && fundingPrice > 0 && thresholdFrac > 0
+                    ? (Number(formatEther(terms.principalAmount)) * fundingPrice) /
+                      (Number(formatEther(terms.collateralAmount)) * thresholdFrac)
+                    : null;
+
+                const outstandingEth =
+                  outstandingVal !== undefined ? parseFloat(formatEther(outstandingVal)) : null;
+                const repaidSoFarEth =
+                  outstandingVal !== undefined
+                    ? Math.max(
+                        0,
+                        parseFloat(formatEther(terms.principalAmount)) +
+                          (previewVal ? 0 : 0) -
+                          outstandingEth!,
+                      )
+                    : null;
                 const dueDate =
                   repaymentDueAtVal !== undefined
                     ? new Date(Number(repaymentDueAtVal) * 1000).toLocaleDateString('en-US', {
@@ -994,6 +1061,57 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         </div>
                       </div>
                     )}
+
+                    {/* Money picture — what's owed, what's been paid, what you'd recover */}
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 mb-3">
+                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">
+                        Where the money stands
+                      </p>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        <div>
+                          <p className="text-[10px] text-slate-600">Still owed to you</p>
+                          <p className="text-sm font-mono font-bold text-amber-400">
+                            {outstandingEth !== null ? `${outstandingEth.toFixed(6)} ETH` : '…'}
+                          </p>
+                          <p className="text-[10px] text-slate-700">principal + interest so far</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-slate-600">Repaid so far</p>
+                          <p className="text-sm font-mono font-bold text-emerald-400">
+                            {repaidSoFarEth !== null ? `${repaidSoFarEth.toFixed(6)} ETH` : '…'}
+                          </p>
+                          <p className="text-[10px] text-slate-700">already in your wallet</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-slate-600">If you liquidated now</p>
+                          <p className="text-sm font-mono font-bold text-white">
+                            {previewVal ? `${parseFloat(formatEther(previewVal.seize)).toFixed(6)} ETH` : '…'}
+                          </p>
+                          <p className="text-[10px] text-slate-700">
+                            {previewVal
+                              ? `${parseFloat(formatEther(previewVal.refund)).toFixed(6)} ETH back to borrower`
+                              : 'you recover only what is owed'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {liqPriceUsd !== null && (
+                        <p className="text-[10px] text-slate-600 mt-2 pt-2 border-t border-slate-800/60">
+                          Funded when ETH was{' '}
+                          <span className="font-mono text-slate-400">${fundingPrice?.toLocaleString()}</span>. The debt
+                          is fixed in USD at that price, so this becomes liquidatable once ETH falls below{' '}
+                          <span className="font-mono text-amber-400">
+                            ${liqPriceUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                          </span>
+                          {' '}— dropping the price to the level it was funded at changes nothing.
+                        </p>
+                      )}
+
+                      <p className="text-[10px] text-slate-700 mt-1.5">
+                        Payments arrive as internal contract transfers, so your balance changes but
+                        MetaMask&apos;s activity list won&apos;t show a new entry.
+                      </p>
+                    </div>
 
                     {/* Collateral info */}
                     <div className="flex flex-wrap gap-4 text-[11px] text-slate-600 pt-3 border-t border-slate-800/60">

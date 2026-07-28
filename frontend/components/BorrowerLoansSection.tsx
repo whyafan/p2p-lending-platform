@@ -248,6 +248,28 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
       })),
     [myLoanAddresses, chainId],
   );
+  const priceAtFundingContracts = useMemo(
+    () =>
+      myLoanAddresses.map((addr) => ({
+        address: addr,
+        abi: LOAN_ABI,
+        functionName: 'priceAtFunding' as const,
+        chainId,
+      })),
+    [myLoanAddresses, chainId],
+  );
+  const { data: priceAtFundingResults } = useReadContracts({
+    contracts: priceAtFundingContracts,
+    query: { enabled: priceAtFundingContracts.length > 0, refetchInterval: 60_000 },
+  });
+  const priceAtFundingByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    priceAtFundingContracts.forEach((c, i) => {
+      const r = priceAtFundingResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [priceAtFundingContracts, priceAtFundingResults]);
   const { data: previewResults, refetch: refetchPreview } = useReadContracts({
     contracts: previewContracts,
     query: { enabled: previewContracts.length > 0, refetchInterval: POLL_MS },
@@ -320,7 +342,8 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         const repaymentDueAtVal = loanAddr ? repaymentDueAtByAddress.get(loanAddr) : undefined;
         const isDelinquentVal = loanAddr ? isDelinquentByAddress.get(loanAddr) : undefined;
         const previewVal = loanAddr ? previewByAddress.get(loanAddr) : undefined;
-        return { id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal };
+        const priceAtFundingVal = loanAddr ? priceAtFundingByAddress.get(loanAddr) : undefined;
+        return { id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal, priceAtFundingVal };
       })
       .sort((a, b) => Number(b.terms.createdAt) - Number(a.terms.createdAt));
   }, [
@@ -332,6 +355,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     repaymentDueAtByAddress,
     isDelinquentByAddress,
     previewByAddress,
+    priceAtFundingByAddress,
   ]);
 
   const pendingCount = myLoans.filter((l) => l.statusVal === 0).length;
@@ -438,7 +462,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         </div>
       ) : (
         <div className="space-y-3">
-          {loansWithTx.map(({ id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal, txHash }) => {
+          {loansWithTx.map(({ id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal, priceAtFundingVal, txHash }) => {
             const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
             const aprNum = Number(terms.interestBps) / 100;
             const principalEth = parseFloat(formatEther(terms.principalAmount));
@@ -565,6 +589,23 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                         <p className="text-sm font-mono font-bold text-amber-400">
                           {outstandingEth !== null ? `${parseFloat(outstandingEth).toFixed(6)} ETH` : '…'}
                         </p>
+                        {outstandingVal !== undefined && (() => {
+                          // Interest accrues by elapsed time, so repaying early means
+                          // almost none — worth showing so it doesn't look ignored.
+                          const zero = BigInt(0);
+                          const paid = terms.principalAmount > outstandingVal
+                            ? terms.principalAmount - outstandingVal
+                            : zero;
+                          const interest =
+                            outstandingVal + paid > terms.principalAmount
+                              ? outstandingVal + paid - terms.principalAmount
+                              : zero;
+                          return (
+                            <p className="text-[10px] text-slate-600">
+                              incl. <span className="font-mono text-slate-500">{parseFloat(formatEther(interest)).toFixed(8)} ETH</span> interest accrued so far
+                            </p>
+                          );
+                        })()}
                       </div>
                       {dueDate && (
                         <p className="text-[11px] text-slate-500">
@@ -645,6 +686,22 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                           — every payment you make shrinks the first number.
                         </>
                       )}
+                      {priceAtFundingVal && Number(priceAtFundingVal) > 0 && (() => {
+                        const thresholdFrac =
+                          (Number(terms.maxLtvBps) + Number(terms.liquidationBufferBps)) / 10_000;
+                        const liqPrice =
+                          (parseFloat(formatEther(terms.principalAmount)) * Number(priceAtFundingVal)) /
+                          (parseFloat(formatEther(terms.collateralAmount)) * thresholdFrac);
+                        return (
+                          <>
+                            {' '}Funded when ETH was ${Number(priceAtFundingVal).toLocaleString()}; a price
+                            crash only puts you at risk below{' '}
+                            <span className="font-mono text-amber-500/80">
+                              ${liqPrice.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            </span>.
+                          </>
+                        );
+                      })()}
                     </p>
 
                     {isRepayingThis && repayHash && (

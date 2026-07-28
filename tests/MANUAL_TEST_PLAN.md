@@ -167,6 +167,19 @@ npx hardhat verify --build-profile production --network sepolia <address> [ctorA
 
 **Interest rounds to 0 on tiny loans** (< ~3650 wei). Use ≥ 0.01 ETH or the numbers look broken.
 
+**Interest accrues by elapsed time, not per loan.** A 90-day loan at 15% APR on 0.00225 ETH earns
+~0.000083 ETH *over the full 90 days*. Repay after ten minutes and you owe a few hundred wei of
+interest — that is correct, not a bug. To see meaningful interest, use `/demo` → Skip time first.
+
+**The liquidation price is relative to the price at FUNDING, not $2,000.** The debt is frozen in USD
+when the lender funds. If you crash to \$500 and *then* fund, \$500 becomes the baseline and nothing
+is liquidatable; you would have to crash further still. Both dashboards now print the exact price
+this loan liquidates below — trust that number, not a mental \$2,000 anchor.
+
+**MetaMask never shows these payments.** Repayments, seizures and refunds all arrive as *internal*
+contract transfers. Wallet balances change but no entry appears in MetaMask's activity list. Verify
+with the balance itself or the contract on a block explorer.
+
 ---
 
 ## Findings log
