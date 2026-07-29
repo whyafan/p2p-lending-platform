@@ -16,6 +16,8 @@ import { inferRiskTierFromBps, RISK_TIER_CONFIG, BASE_APR } from '../lib/loan-te
 import { formatUsd, formatPercent } from '../lib/format';
 import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
 import { LoanSafetyPanel } from './LoanSafetyPanel';
+import { LoanSettlementReceipt } from './LoanSettlementReceipt';
+import { useLoanEvents } from '../hooks/useLoanEvents';
 import type { FeatureContribution } from '../lib/risk-explainer';
 import type { RiskTier } from '../lib/loan-terms';
 
@@ -487,6 +489,21 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     loanIds, termsResults, statusByAddress, lenderByAddress, isLiquidatableByAddress,
     repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress, previewByAddress, outstandingByAddress, priceAtFundingByAddress,
   ]);
+
+  const settledAddresses = useMemo(
+    () =>
+      loans
+        .filter((l) => (l.statusVal === 2 || l.statusVal === 4) && l.terms)
+        .map((l) => l.terms!.loanContract),
+    [loans],
+  );
+  const { byLoan: eventsByLoan, priceFor } = useLoanEvents({
+    factoryAddress,
+    loanContracts: settledAddresses,
+    chainId,
+    ethPrice,
+    enabled: settledAddresses.length > 0,
+  });
 
   const openLoans = useMemo(
     () => loans.filter((l) => l.statusVal === 0 && l.terms && !isExpired(l.terms.createdAt)),
@@ -1232,6 +1249,17 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       >
                         Contract ↗
                       </a>
+
+                      <div className="w-full">
+                        <LoanSettlementReceipt
+                          role="lender"
+                          principal={terms.principalAmount}
+                          collateral={terms.collateralAmount}
+                          events={eventsByLoan.get(terms.loanContract.toLowerCase()) ?? []}
+                          statusVal={statusVal ?? 2}
+                          priceFor={priceFor}
+                        />
+                      </div>
                     </div>
                   );
                 })}

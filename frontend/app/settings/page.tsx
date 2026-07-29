@@ -9,6 +9,8 @@ import { useCompliance } from '../../hooks/useCompliance';
 import { createClient } from '../../lib/supabase/client';
 import { kycStatusLabel } from '../../lib/kyc';
 import { PriceTicker } from '../../components/PriceTicker';
+import { StatementsPanel } from '../../components/StatementsPanel';
+import { useTokenUsdPrice } from '../../hooks/useTokenPrices';
 import { Hexagon, Check, Wallet } from 'lucide-react';
 
 const ROLE_OPTIONS = [
@@ -91,6 +93,7 @@ export default function SettingsPage() {
   const hydrated = useHydrated();
   const [walletStatus, setWalletStatus] = useState('');
   const [isLinkingWallet, setIsLinkingWallet] = useState(false);
+  const { priceUsd: ethPrice } = useTokenUsdPrice('ETH');
   const [roleStatus, setRoleStatus] = useState('');
   const [isUpdatingRole, setIsUpdatingRole] = useState(false);
   const [showConnector, setShowConnector] = useState(false);
@@ -485,6 +488,9 @@ export default function SettingsPage() {
               )}
             </div>
           </div>
+
+          {/* ── Statements (T3) ── */}
+          <StatementsPanel email={user?.email} ethPrice={ethPrice} />
 
           {/* ── Role Management ── */}
           <div id="role" className="rounded-2xl border border-slate-800 bg-[#111827] p-6 scroll-mt-6">

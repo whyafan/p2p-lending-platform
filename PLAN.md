@@ -200,7 +200,11 @@ Two people, real wallets, live Sepolia. **All tracks passed.** Verified against 
 
 This is the highest-priority work. Everything below it is secondary.
 
-### T1 — Settlement receipts on every closed loan
+**All three shipped 2026-07-29.** Requires **migration `004_event_price_snapshots.sql`** to be run in Supabase before per-event prices are recorded; without it statements still generate, valued at the current price and labelled "(est.)".
+
+**Permanent `getLogs` range.** `findDeploymentBlock()` in `lib/loan-events.ts` binary-searches the factory's deployment block via `eth_getCode` (`0x` before deployment, bytecode after), then caches it. Roughly 25 RPC calls once per session. This is derived rather than pinned in an env var precisely because contracts get redeployed often here — a hardcoded block silently yields an empty history the moment it goes stale. Logs are then fetched in 9,000-block chunks so a wide range never trips an RPC's span limit.
+
+### ✅ T1 — Settlement receipts on every closed loan *(shipped 2026-07-29)*
 
 For a **lender**, on any `Repaid`/`Liquidated` position, show:
 - Total lent (principal) · total actually received · **interest earned, in ETH and USD** · whether it closed by repayment or liquidation
@@ -213,11 +217,11 @@ For a **borrower**, on any closed loan:
 
 Currently the lender only sees interest gained, which is the least useful number of the set.
 
-### T2 — Event-backed history
+### ✅ T2 — Event-backed history *(shipped 2026-07-29)*
 
 The above needs the actual transaction hashes, which only exist in event logs. Index `LoanFunded`, `PartialRepayment`, `LoanRepaid`, `LoanLiquidated` and `CollateralReleased` per loan via `getLogs`, and render a timeline. This also removes the current `localStorage` tx-hash matching hack in `BorrowerLoansSection`, which is fragile and only ever knew about loan *creation*.
 
-### T3 — Downloadable statements (PDF, from Settings)
+### ✅ T3 — Downloadable statements *(shipped 2026-07-29)*
 
 Both roles, generated from the indexed events in T2:
 - **P&L** — realised gains/losses per loan and in aggregate

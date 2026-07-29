@@ -1,7 +1,7 @@
 # NexusFi — Manual Test Plan
 
 Living checklist for manually testing the deployed app against live Sepolia contracts.
-Automated contract tests live in `contracts/test/` (`npx hardhat test`, 12 passing) — this file covers what those can't: the real UI, real wallets, two real people.
+Automated contract tests live in `contracts/test/` (`npx hardhat test`, 28 passing) — this file covers what those can't: the real UI, real wallets, two real people.
 
 > **Status: COMPLETE — all tracks passed (2026-07-26 → 29).**
 > Two people, real wallets, live Sepolia, nine loans across the full lifecycle. Results verified

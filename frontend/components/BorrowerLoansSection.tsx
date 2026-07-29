@@ -14,6 +14,8 @@ import { sepolia } from 'wagmi/chains';
 import { inferRiskTierFromBps } from '../lib/loan-terms';
 import { formatUsd } from '../lib/format';
 import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
+import { LoanSettlementReceipt } from './LoanSettlementReceipt';
+import { useLoanEvents } from '../hooks/useLoanEvents';
 import { Hexagon, Check, AlertTriangle } from 'lucide-react';
 
 export const MAX_OPEN_REQUESTS = 3;
@@ -357,6 +359,22 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     previewByAddress,
     priceAtFundingByAddress,
   ]);
+
+  // Settlement history for closed loans — the record MetaMask can't give them.
+  const settledAddresses = useMemo(
+    () =>
+      myLoans
+        .filter((l) => l.statusVal === 2 || l.statusVal === 4)
+        .map((l) => l.terms.loanContract),
+    [myLoans],
+  );
+  const { byLoan: eventsByLoan, priceFor } = useLoanEvents({
+    factoryAddress,
+    loanContracts: settledAddresses,
+    chainId,
+    ethPrice,
+    enabled: settledAddresses.length > 0,
+  });
 
   const pendingCount = myLoans.filter((l) => l.statusVal === 0).length;
 
@@ -719,6 +737,19 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                     {repayError && repayErrorLoanId === id && (
                       <p className="mt-2 text-[11px] text-red-400 font-mono break-all">{repayError}</p>
                     )}
+                  </div>
+                )}
+
+                {(statusNum === 2 || statusNum === 4) && (
+                  <div className="mb-3">
+                    <LoanSettlementReceipt
+                      role="borrower"
+                      principal={terms.principalAmount}
+                      collateral={terms.collateralAmount}
+                      events={eventsByLoan.get(terms.loanContract.toLowerCase()) ?? []}
+                      statusVal={statusNum}
+                      priceFor={priceFor}
+                    />
                   </div>
                 )}
 

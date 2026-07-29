@@ -1,0 +1,277 @@
+/**
+ * Statement generation (T3): P&L, Tax P&L and Tradebook as PDFs.
+ *
+ * Built entirely from indexed on-chain events plus the per-event price snapshots,
+ * so every figure traces back to a transaction hash a reader can verify. Nothing
+ * here is derived from wallet balances, which is the whole point — MetaMask
+ * cannot show internal contract transfers, so it can't be the source of truth.
+ */
+
+import { formatEther } from 'viem';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import type { LoanEvent } from './loan-events';
+import { EVENT_LABEL } from './loan-events';
+
+export type StatementRole = 'lender' | 'borrower';
+
+export type StatementLoan = {
+  loanId: string;
+  loanContract: string;
+  principal: bigint;
+  collateral: bigint;
+  interestBps: number;
+  durationDays: number;
+  statusVal: number;
+  counterparty?: string;
+  events: LoanEvent[];
+};
+
+export type StatementMeta = {
+  role: StatementRole;
+  walletAddress?: string;
+  email?: string;
+  /** Values an event; `estimated` when no snapshot existed for it. */
+  priceFor: (e: LoanEvent) => { usd: number; estimated: boolean };
+  currentEthUsd: number;
+};
+
+const ETH = (w: bigint) => parseFloat(formatEther(w));
+const fmtEth = (w: bigint) => ETH(w).toFixed(8);
+const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
+const dt = (ts?: number) => (ts ? new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 19) : '—');
+
+/** Net position on one loan, from the perspective of `role`. */
+export function computeLoanPnl(loan: StatementLoan, role: StatementRole) {
+  const zero = BigInt(0);
+  const repayments = loan.events.filter(
+    (e) => e.kind === 'partial-repayment' || e.kind === 'repaid',
+  );
+  const totalRepaid = repayments.reduce((s, e) => s + e.amount, zero);
+  const liq = loan.events.find((e) => e.kind === 'liquidated');
+  const seized = liq?.amount ?? zero;
+  const refunded = liq?.refunded ?? zero;
+  const liquidated = loan.statusVal === 4;
+
+  if (role === 'lender') {
+    const outflow = loan.principal;
+    const inflow = totalRepaid + seized;
+    return { outflow, inflow, net: inflow - outflow, liquidated, totalRepaid, seized, refunded };
+  }
+  // Borrower: received principal; paid repayments and any collateral not returned.
+  const collateralLost = liquidated ? loan.collateral - refunded : zero;
+  const inflow = loan.principal + (liquidated ? refunded : loan.collateral);
+  const outflow = totalRepaid + loan.collateral;
+  return {
+    outflow,
+    inflow,
+    net: inflow - outflow,
+    liquidated,
+    totalRepaid,
+    seized: collateralLost,
+    refunded,
+  };
+}
+
+function header(doc: jsPDF, title: string, meta: StatementMeta, subtitle: string) {
+  doc.setFontSize(16);
+  doc.text('NexusFi', 14, 16);
+  doc.setFontSize(12);
+  doc.text(title, 14, 24);
+  doc.setFontSize(8);
+  doc.setTextColor(110);
+  const lines = [
+    `Role: ${meta.role}`,
+    meta.email ? `Account: ${meta.email}` : null,
+    meta.walletAddress ? `Wallet: ${meta.walletAddress}` : null,
+    `Generated: ${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC`,
+    'Network: Sepolia testnet — figures are in test ETH and carry no real value.',
+    subtitle,
+  ].filter(Boolean) as string[];
+  lines.forEach((l, i) => doc.text(l, 14, 31 + i * 4));
+  doc.setTextColor(0);
+  return 31 + lines.length * 4 + 4;
+}
+
+function footer(doc: jsPDF, estimatedUsed: boolean) {
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7);
+    doc.setTextColor(130);
+    const note = estimatedUsed
+      ? 'USD values use the price captured at each event where available; entries marked (est.) use the current price.'
+      : 'USD values use the ETH price captured at the time of each event.';
+    doc.text(note, 14, doc.internal.pageSize.getHeight() - 12);
+    doc.text(
+      `Every row is verifiable on sepolia.etherscan.io by transaction hash.   Page ${i} of ${pages}`,
+      14,
+      doc.internal.pageSize.getHeight() - 8,
+    );
+    doc.setTextColor(0);
+  }
+}
+
+export function generateTradebook(loans: StatementLoan[], meta: StatementMeta): jsPDF {
+  const doc = new jsPDF({ orientation: 'landscape' });
+  const startY = header(doc, 'Tradebook', meta, 'Every on-chain action, chronologically.');
+
+  let estimated = false;
+  const rows = loans
+    .flatMap((loan) =>
+      loan.events.map((e) => {
+        const p = meta.priceFor(e);
+        if (p.estimated) estimated = true;
+        return {
+          ts: e.timestamp ?? 0,
+          row: [
+            dt(e.timestamp),
+            `#${loan.loanId}`,
+            EVENT_LABEL[e.kind],
+            fmtEth(e.amount),
+            p.usd ? `${fmtUsd(ETH(e.amount) * p.usd)}${p.estimated ? ' (est.)' : ''}` : '—',
+            e.kind === 'liquidated' && e.refunded !== undefined ? fmtEth(e.refunded) : '',
+            e.txHash,
+          ],
+        };
+      }),
+    )
+    .sort((a, b) => a.ts - b.ts)
+    .map((r) => r.row);
+
+  autoTable(doc, {
+    startY,
+    head: [['Date (UTC)', 'Loan', 'Action', 'ETH', 'USD', 'Refunded ETH', 'Transaction hash']],
+    body: rows.length ? rows : [['—', '—', 'No activity yet', '—', '—', '', '']],
+    styles: { fontSize: 7, cellPadding: 1.5 },
+    headStyles: { fillColor: [15, 23, 42] },
+    columnStyles: { 6: { cellWidth: 90 } },
+  });
+  footer(doc, estimated);
+  return doc;
+}
+
+export function generatePnl(loans: StatementLoan[], meta: StatementMeta): jsPDF {
+  const doc = new jsPDF({ orientation: 'landscape' });
+  const startY = header(
+    doc,
+    'Profit & Loss',
+    meta,
+    meta.role === 'lender'
+      ? 'Realised result per loan funded.'
+      : 'Cost of borrowing per loan taken.',
+  );
+
+  const zero = BigInt(0);
+  let totalNet = zero;
+  const body = loans.map((loan) => {
+    const p = computeLoanPnl(loan, meta.role);
+    totalNet += p.net;
+    return [
+      `#${loan.loanId}`,
+      loan.statusVal === 4 ? 'Liquidated' : loan.statusVal === 2 ? 'Repaid' : 'Open',
+      fmtEth(loan.principal),
+      fmtEth(p.totalRepaid),
+      p.liquidated ? fmtEth(p.seized) : '—',
+      fmtEth(p.inflow),
+      fmtEth(p.outflow),
+      `${p.net >= zero ? '+' : '-'}${fmtEth(p.net >= zero ? p.net : -p.net)}`,
+      meta.currentEthUsd
+        ? `${p.net >= zero ? '+' : '-'}${fmtUsd(Math.abs(ETH(p.net)) * meta.currentEthUsd)}`
+        : '—',
+    ];
+  });
+
+  autoTable(doc, {
+    startY,
+    head: [
+      [
+        'Loan',
+        'Status',
+        'Principal',
+        'Repaid',
+        meta.role === 'lender' ? 'Seized' : 'Collateral lost',
+        'Total in',
+        'Total out',
+        'Net ETH',
+        'Net USD',
+      ],
+    ],
+    body: body.length ? body : [['—', 'No loans', '—', '—', '—', '—', '—', '—', '—']],
+    foot: [[
+      'TOTAL', '', '', '', '', '', '',
+      `${totalNet >= zero ? '+' : '-'}${fmtEth(totalNet >= zero ? totalNet : -totalNet)}`,
+      meta.currentEthUsd
+        ? `${totalNet >= zero ? '+' : '-'}${fmtUsd(Math.abs(ETH(totalNet)) * meta.currentEthUsd)}`
+        : '—',
+    ]],
+    styles: { fontSize: 7, cellPadding: 1.5 },
+    headStyles: { fillColor: [15, 23, 42] },
+    footStyles: { fillColor: [30, 41, 59], textColor: 255 },
+  });
+  footer(doc, false);
+  return doc;
+}
+
+export function generateTaxPnl(loans: StatementLoan[], meta: StatementMeta): jsPDF {
+  const doc = new jsPDF({ orientation: 'landscape' });
+  const startY = header(
+    doc,
+    'Tax P&L',
+    meta,
+    'Disposals and acquisitions with the ETH/USD rate at the time of each event.',
+  );
+
+  let estimated = false;
+  const rows = loans
+    .flatMap((loan) =>
+      loan.events.map((e) => {
+        const p = meta.priceFor(e);
+        if (p.estimated) estimated = true;
+        // Direction is role-relative: what left vs. entered this user's control.
+        const inbound =
+          meta.role === 'lender'
+            ? e.kind !== 'funded'
+            : e.kind === 'funded' || e.kind === 'liquidated';
+        return {
+          ts: e.timestamp ?? 0,
+          row: [
+            dt(e.timestamp),
+            `#${loan.loanId}`,
+            inbound ? 'Acquisition' : 'Disposal',
+            EVENT_LABEL[e.kind],
+            fmtEth(e.amount),
+            p.usd ? `${p.usd.toFixed(2)}${p.estimated ? ' (est.)' : ''}` : '—',
+            p.usd ? fmtUsd(ETH(e.amount) * p.usd) : '—',
+            e.txHash.slice(0, 20) + '…',
+          ],
+        };
+      }),
+    )
+    .sort((a, b) => a.ts - b.ts)
+    .map((r) => r.row);
+
+  autoTable(doc, {
+    startY,
+    head: [['Date (UTC)', 'Loan', 'Type', 'Event', 'ETH', 'ETH/USD rate', 'Value USD', 'Tx']],
+    body: rows.length ? rows : [['—', '—', '—', 'No activity yet', '—', '—', '—', '']],
+    styles: { fontSize: 7, cellPadding: 1.5 },
+    headStyles: { fillColor: [15, 23, 42] },
+  });
+
+  const finalY = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY;
+  doc.setFontSize(7);
+  doc.setTextColor(110);
+  doc.text(
+    'Not tax advice. Sepolia test ETH has no market value; this demonstrates the reporting format only.',
+    14,
+    finalY + 6,
+  );
+  doc.setTextColor(0);
+  footer(doc, estimated);
+  return doc;
+}
+
+export function statementFilename(kind: string, role: StatementRole) {
+  return `nexusfi-${kind}-${role}-${new Date().toISOString().slice(0, 10)}.pdf`;
+}
