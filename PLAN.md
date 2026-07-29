@@ -1,6 +1,6 @@
 # NexusFi P2P Lending Platform — Implementation Plan
 
-> Last updated: 2026-07-26 (evening)
+> Last updated: 2026-07-29 — manual testing complete; transparency is the new baseline
 > Team: K.J. Somaiya School of Engineering final-year project (Afan Khan, Atharva Patil, Viren Rathod, Siddharth Singh). Stack: Next.js 16 + React 19 + wagmi v2 + viem + Solidity 0.8.28 + Hardhat 3 (Ignition) + Supabase + Tailwind v4. Optional FastAPI credit-scoring backend.
 > Official reference docs (in `docs/archive/` unless noted): the literature review (`Literature Review_ P2P Blockchain Lending Platform`), the K.J. Somaiya project brief (`Blockchain_P2P_Lending_Platform.md`), and the borrower/lender user-journey spec. This file is the **living, code-accurate** status tracker — read it before the academic docs, since those describe intent and this describes what actually runs.
 
@@ -176,38 +176,71 @@ Four things landed back to back. All are live on Sepolia and deployed to every b
 
 ---
 
-## 🎯 NEXT: manual testing (before any new features)
+## ✅ Manual testing COMPLETE (2026-07-26 → 29)
 
-**Nothing about the above has been verified through the actual UI with two real people.** Only the automated suite and the deploy transactions are proven. That gap is the priority — features are on hold until it closes.
+Two people, real wallets, live Sepolia. **All tracks passed.** Verified against on-chain state, not UI impressions — nine loans across the full lifecycle.
 
-Full checklist: **[tests/MANUAL_TEST_PLAN.md](tests/MANUAL_TEST_PLAN.md)**. Fill in the checkboxes and the findings table as you go.
+| Track | Result |
+|---|---|
+| **A** Repayment lifecycle | ✅ Pass, incl. **A6** overpay refund (loans #4, #6 closed with `amountRepaid` capped at the debt and all 0.005 collateral released) |
+| **B** Deadline → grace → liquidation | ✅ Pass via `/demo` Skip time |
+| **C** Two-user visibility | ✅ Pass after the polling fix |
+| **D** Price-crash liquidation | ✅ Pass, incl. the `$0` broken-oracle fail-safe |
+| **E** Partial-liquidation fairness | ✅ Pass — **E2** (figures shrink on repayment), **E3** (loans #5, #7: repaid 0.00125 → seized 0.001085, refunded 0.003915), **E4** (loans #2, #3, #8: no repayment → seized only the debt ~0.002335, refunded ~0.002665) |
 
-### Session plan (~60–90 min, one sitting)
+**Interest is working and is ETH-denominated.** On-chain: loans left to accrue show `0.000085068 ETH` interest (90d @ 15% APR on 0.00225 ETH ≈ 0.0000832 — matches). Loans repaid immediately show ~1 wei, because accrual is *by elapsed time*. It only looked absent because the UI renders it in USD ($0.16) and because demo-scale amounts are tiny.
 
-`/demo` collapses what used to be a 3-day exercise into minutes, so all four tracks fit in one session:
+**Automatic liquidation is confirmed out of scope.** Contracts cannot self-execute. Real protocols pay liquidator bots a bonus to race for it, or use a keeper network. Ours requires the lender to click, and that is now a documented design position rather than a gap.
 
-| Order | Track | What | Time |
-|---|---|---|---|
-| 1 | **A** | Repayment lifecycle — partial, second partial, repay-in-full, overpay refund, plus the "should fail" cases | ~25 min |
-| 2 | **D** | Price crash via `/demo` — LTV climbs, threshold, liquidate, recovery, and the $0 broken-oracle fail-safe | ~15 min |
-| 3 | **B** | Deadline path via `/demo` → Skip time — past due badge, grace period blocking, liquidate after grace | ~15 min |
-| 4 | **C** | Two-user visibility — Afan borrows, Siddharth lends, do they see each other | ~15 min |
+---
 
-**Prerequisites:** both people signed up + KYC'd (demo bypass) + wallet linked, both wallets holding Sepolia ETH, both on **testnet** mode. Supabase auth settings are done.
+## 🎯 THE NEW BASELINE: settlement transparency
 
-**Expect to find things.** BUG-VIS (loans not reliably visible across accounts) is unfixed and Track C targets it directly — log what actually happens rather than working around it.
+**The problem, stated plainly:** every payment in this system — funding, repayment, seizure, refund — moves as an *internal contract transfer*. MetaMask does not list internal transfers. So both sides watched their balances change with no record of what happened, and repeatedly concluded "nothing was received" when the money had in fact moved correctly. **The app must be the source of truth, because the wallet cannot be.**
 
-### After testing
+This is the highest-priority work. Everything below it is secondary.
 
-Re-triage based on findings. Current expectation, highest value first:
+### T1 — Settlement receipts on every closed loan
 
-1. **BUG-VIS** — likely the real blocker for any two-person demo.
-2. **Lender risk-tier badges** — ~1hr, visibly missing, previously parked.
-3. **Multi-lender pooling** — biggest remaining gap vs. the literature review.
+For a **lender**, on any `Repaid`/`Liquidated` position, show:
+- Total lent (principal) · total actually received · **interest earned, in ETH and USD** · whether it closed by repayment or liquidation
+- If liquidated: amount seized vs. amount refunded to the borrower
+- Etherscan links for *every* leg — the funding tx, each repayment, the liquidation
 
-### If you want to build in parallel tonight
+For a **borrower**, on any closed loan:
+- Total borrowed · total repaid · interest paid · collateral returned or seized
+- The same per-leg Etherscan links
 
-Something independent of the test findings, so a bug discovered in testing doesn't invalidate it: **lender risk-tier badges** (self-contained UI, no contract change) or **contract verification on Etherscan** (`--verify`, makes the demo more credible and touches nothing).
+Currently the lender only sees interest gained, which is the least useful number of the set.
+
+### T2 — Event-backed history
+
+The above needs the actual transaction hashes, which only exist in event logs. Index `LoanFunded`, `PartialRepayment`, `LoanRepaid`, `LoanLiquidated` and `CollateralReleased` per loan via `getLogs`, and render a timeline. This also removes the current `localStorage` tx-hash matching hack in `BorrowerLoansSection`, which is fragile and only ever knew about loan *creation*.
+
+### T3 — Downloadable statements (PDF, from Settings)
+
+Both roles, generated from the indexed events in T2:
+- **P&L** — realised gains/losses per loan and in aggregate
+- **Tax P&L** — disposals with dates, cost basis, and proceeds in fiat at the time of each event
+- **Tradebook** — every action chronologically: funded, repaid, liquidated, with hashes
+
+Settings page gains a Statements section. Note that the price *at the time of each event* is needed for fiat columns; only `priceAtFunding` is currently stored on-chain, so either snapshot prices per event off-chain or state plainly that fiat values use the current price.
+
+---
+
+## 🐛 Reported bugs, not yet fixed
+
+| # | Issue | Notes |
+|---|---|---|
+| **B1** | **Risk tier / risk score not scored** | Needs a precise repro — which mode (demo persona vs. real wallet), and where it shows unscored. Demo personas do score correctly (see screenshots: Bob → −0.250 → Tier C), so this is likely the real-wallet path or the lender-side persisted assessment. |
+| **B2** | ETH price on the dashboard is unlabelled and static | Should say explicitly it is the **current market** ETH price and tick live rather than only refreshing on load. |
+| **B3** | "What went into your score" panel renders **light-on-white** | `RiskExplanationPanel.tsx` hardcodes `bg-white` / `bg-slate-50` / dark text while the rest of the app is dark. Restyle to match. |
+
+---
+
+## 🔭 Also queued
+
+- **Multi-lender pooling (1:N funding)** — several lenders contribute partial amounts to one loan; pro-rata repayment. Explicitly called "MVP-feasible" in the lender-journey doc. Biggest remaining architectural gap.
 
 ---
 
@@ -215,7 +248,7 @@ Something independent of the test findings, so a bug discovered in testing doesn
 
 ### In scope for the project (confirmed by official docs)
 
-- **Multi-lender pooling** — the lender-journey doc explicitly describes partial fills across multiple lenders as "still MVP-feasible," not just a stretch goal. Needs: a contribution mapping per loan, a funding-closes-when-full condition, and pro-rata repayment distribution. ~1 day of contract + frontend work. Tracked in scope, not started.
+- **Multi-lender pooling** — see "Also queued" above.
 - **Peer discovery** — there's no way for users to find/identify each other on the platform. A searchable directory of verified users (by display name or linked wallet address) would let teammates coordinate borrower/lender pairs instead of guessing loan IDs blind. Not started.
 
 ### Kept intentionally low priority

@@ -3,10 +3,27 @@
 Living checklist for manually testing the deployed app against live Sepolia contracts.
 Automated contract tests live in `contracts/test/` (`npx hardhat test`, 12 passing) — this file covers what those can't: the real UI, real wallets, two real people.
 
-> **Status: session 1 (2026-07-26) partially run, then stopped.** A loan was created, funded,
-> and time-skipped to liquidation — which exposed several real bugs (see Findings). Those are
-> fixed and the contracts were redeployed, so **all earlier loans are gone and testing restarts
-> from scratch.** Tick boxes as you go and fill in the findings table.
+> **Status: COMPLETE — all tracks passed (2026-07-26 → 29).**
+> Two people, real wallets, live Sepolia, nine loans across the full lifecycle. Results verified
+> against on-chain state rather than UI impressions.
+>
+> This file is now a **regression checklist**: re-run it after any contract change or redeploy.
+> The findings table at the bottom is the permanent record of what testing uncovered.
+
+## Results
+
+| Track | Result | Evidence |
+|---|---|---|
+| **A** Repayment lifecycle | ✅ Pass | Partial, second partial, repay-in-full, **A6 overpay refund** — loans #4 and #6 closed with `amountRepaid` capped at the debt and all 0.005 ETH collateral released |
+| **B** Deadline → grace → liquidation | ✅ Pass | Run via `/demo` Skip time |
+| **C** Two-user visibility | ✅ Pass | After the background-polling fix |
+| **D** Price-crash liquidation | ✅ Pass | Incl. the `$0` broken-oracle fail-safe blocking liquidation |
+| **E** Partial-liquidation fairness | ✅ Pass | **E2** figures shrink on repayment · **E3** loans #5/#7 repaid 0.00125 → seized 0.001085, refunded 0.003915 · **E4** loans #2/#3/#8 no repayment → seized only ~0.002335, refunded ~0.002665 |
+
+**Interest confirmed working and ETH-denominated.** Loans left to accrue show `0.000085068 ETH`
+(90d @ 15% APR on 0.00225 ETH ≈ 0.0000832 — matches). Loans repaid immediately show ~1 wei, because
+accrual is by *elapsed time*. It only looked missing because the UI renders it in USD and demo
+amounts are tiny.
 
 ---
 
@@ -189,8 +206,13 @@ with the balance itself or the contract on a block explorer.
 | 07-26 | A (repay) | Both users had to refresh constantly; lender's position vanished after repayment | Live updates; settled loans retained | **Fixed** — polling paused on unfocused tabs, and positions filtered to Funded only |
 | 07-26 | B (liquidation) | Liquidation seized the entire collateral regardless of how much was repaid | Seize only the debt | **Fixed** — partial liquidation, surplus refunded |
 | 07-26 | A (create) | "What happens next" never advanced past step 1 | Follows real loan status | **Fixed twice** — first the steps were hardcoded, then the loan address decode was gated behind the risk assessment |
-| 07-28 | D (price crash) | Crashed ETH to \$500; lender received exactly the principal + interest, not the whole collateral | Correct — this is the intended partial-liquidation behaviour | Not a bug |
-| | | | | |
+| 07-28 | D (price crash) | Crashed ETH to \$500; lender received exactly the principal + interest, not the whole collateral | Correct — intended partial-liquidation behaviour | Not a bug |
+| 07-28 | D | Crashing to \$500 did not enable liquidation | The loan was *funded* at \$500, so that became the baseline; it needed ~\$346 | Not a bug — UI now prints the real trigger price |
+| 07-28 | A/E | "Neither side received anything" | Money moved correctly every time; MetaMask does not list internal contract transfers | **Root cause of most confusion — drives the T1/T2 transparency work** |
+| 07-29 | — | Lender only sees interest gained on a closed loan | Should show lent, received, interest, seized/refunded, and tx links | Open — PLAN.md T1 |
+| 07-29 | — | Risk tier / score not scored | Demo personas score fine; needs repro for the failing path | Open — PLAN.md B1 |
+| 07-29 | — | ETH price unlabelled and static | Should say "current market price" and tick live | Open — PLAN.md B2 |
+| 07-29 | — | "What went into your score" panel is white-on-light | `RiskExplanationPanel` hardcodes `bg-white`; rest of app is dark | Open — PLAN.md B3 |
 
 ---
 
