@@ -245,6 +245,29 @@ export default function AppPage() {
     if (userRole === 'lender') setActiveView('lender');
   }, [userRole]);
 
+  // Seed tier/score from the last assessment we persisted for this user. They
+  // are otherwise transient state set only when the request panel scores a new
+  // loan, so a plain page load always showed "N/A" even for a scored borrower.
+  useEffect(() => {
+    if (!compliance.data?.authenticated) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/loans/risk?latest=1');
+        if (!res.ok) return;
+        const { latest } = await res.json();
+        if (cancelled || !latest) return;
+        setBorrowerTier((prev) => prev ?? latest.tier);
+        setBorrowerScore((prev) => (prev === null ? latest.overallScore : prev));
+      } catch {
+        /* the panel can still score live; this is only a convenience */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [compliance.data?.authenticated]);
+
   const handleTierChange = useCallback((tier: 'A' | 'B' | 'C' | null, score: number | null) => {
     setBorrowerTier(tier);
     setBorrowerScore(score);

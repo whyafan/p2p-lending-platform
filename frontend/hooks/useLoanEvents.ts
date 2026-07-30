@@ -9,11 +9,11 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { usePublicClient } from 'wagmi';
 import {
   fetchBlockTimestamps,
   fetchLoanEvents,
-  findDeploymentBlock,
+  findBlockByTimestamp,
+  getLogsClient,
   groupEventsByLoan,
   type LoanEvent,
 } from '../lib/loan-events';
@@ -24,6 +24,12 @@ type Options = {
   chainId: number;
   /** Current ETH/USD, used to snapshot newly-seen events. */
   ethPrice?: number;
+  /**
+   * Unix seconds of the earliest loan being indexed (its on-chain `createdAt`).
+   * Used to pick a start block by timestamp — far more reliable than probing for
+   * a contract's deployment block, which misreports on non-archive nodes.
+   */
+  fromTimestamp?: number;
   enabled?: boolean;
 };
 
@@ -34,9 +40,12 @@ export function useLoanEvents({
   loanContracts,
   chainId,
   ethPrice,
+  fromTimestamp,
   enabled = true,
 }: Options) {
-  const publicClient = usePublicClient({ chainId });
+  // Log queries need an RPC that serves wide block ranges; the app's default
+  // transport caps eth_getLogs at 10 blocks.
+  const publicClient = useMemo(() => getLogsClient(), []);
   const [events, setEvents] = useState<LoanEvent[]>([]);
   const [prices, setPrices] = useState<Record<string, EventPrice>>({});
   const [isLoading, setIsLoading] = useState(false);
@@ -49,18 +58,17 @@ export function useLoanEvents({
   );
 
   useEffect(() => {
-    if (!enabled || !publicClient || !factoryAddress || !addressKey) return;
+    if (!enabled || !publicClient || !addressKey) return;
     let cancelled = false;
 
     (async () => {
       setIsLoading(true);
       try {
-        // Derived, not hardcoded: contracts get redeployed and a stale block
-        // number would silently yield an empty history.
-        const fromBlock = await findDeploymentBlock(
-          publicClient,
-          factoryAddress as `0x${string}`,
-        );
+        // Start a little before the earliest loan was created. Derived from
+        // on-chain createdAt rather than a hardcoded block, so redeploys and
+        // new loans both keep working.
+        const target = (fromTimestamp ?? Math.floor(Date.now() / 1000) - 30 * 24 * 3600) - 3600;
+        const fromBlock = await findBlockByTimestamp(publicClient, target);
         const raw = await fetchLoanEvents(
           publicClient,
           addressKey.split(',') as `0x${string}`[],
@@ -78,7 +86,7 @@ export function useLoanEvents({
     return () => {
       cancelled = true;
     };
-  }, [enabled, publicClient, factoryAddress, addressKey]);
+  }, [enabled, publicClient, addressKey, fromTimestamp]);
 
   // Load any prices we already recorded, then snapshot the ones we haven't.
   useEffect(() => {

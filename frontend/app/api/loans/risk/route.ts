@@ -95,7 +95,45 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Sign in required' }, { status: 401 });
   }
 
-  const param = new URL(req.url).searchParams.get('loanContracts');
+  const params = new URL(req.url).searchParams;
+
+  const client0 = await db();
+  if (!client0) {
+    return NextResponse.json({ error: 'Database unavailable' }, { status: 503 });
+  }
+
+  // ?latest=1 — the signed-in user's most recent assessment. The dashboard's
+  // tier/score are computed at request time and lost on unmount, so without this
+  // a returning user sees "N/A" until they open the request panel again.
+  if (params.get('latest')) {
+    const { data, error } = await client0
+      .from('loan_risk_assessments')
+      .select('loan_contract, tier, overall_score, contributions, source, persona_id, created_at')
+      .eq('created_by', session.profile.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (error) {
+      console.error('[loans/risk] latest failed:', error.message);
+      return NextResponse.json({ error: 'Could not load assessment' }, { status: 500 });
+    }
+    const row = data?.[0];
+    return NextResponse.json({
+      latest: row
+        ? {
+            loanContract: row.loan_contract,
+            tier: row.tier,
+            overallScore: Number(row.overall_score),
+            contributions: row.contributions,
+            source: row.source,
+            personaId: row.persona_id,
+            createdAt: row.created_at,
+          }
+        : null,
+    });
+  }
+
+  const param = params.get('loanContracts');
   if (!param) {
     return NextResponse.json({ assessments: {} });
   }
@@ -110,12 +148,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ assessments: {} });
   }
 
-  const client = await db();
-  if (!client) {
-    return NextResponse.json({ error: 'Database unavailable' }, { status: 503 });
-  }
-
-  const { data, error } = await client
+  const { data, error } = await client0
     .from('loan_risk_assessments')
     .select('loan_contract, tier, overall_score, contributions, source, persona_id, created_at')
     .in('loan_contract', addresses);

@@ -374,11 +374,17 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         .map((l) => l.terms.loanContract),
     [myLoans],
   );
+  const earliestCreatedAt = useMemo(() => {
+    const times = myLoans.map((l) => Number(l.terms.createdAt));
+    return times.length > 0 ? Math.min(...times) : undefined;
+  }, [myLoans]);
+
   const { byLoan: eventsByLoan, priceFor } = useLoanEvents({
     factoryAddress,
     loanContracts: settledAddresses,
     chainId,
     ethPrice,
+    fromTimestamp: earliestCreatedAt,
     enabled: settledAddresses.length > 0,
   });
 
