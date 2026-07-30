@@ -13,6 +13,7 @@ import { BorrowerLoansSection } from '../../components/BorrowerLoansSection';
 import type { BorrowerPersona } from '../../lib/borrower-personas';
 import { useCompliance } from '../../hooks/useCompliance';
 import { useTokenPrices } from '../../hooks/useTokenPrices';
+import { EthPriceTicker } from '../../components/EthPriceTicker';
 import { createClient } from '../../lib/supabase/client';
 import { RISK_TIER_CONFIG, BASE_APR } from '../../lib/loan-terms';
 import { formatUsd, formatPercent } from '../../lib/format';
@@ -394,18 +395,8 @@ export default function AppPage() {
             Change role
           </Link>
 
-          {/* ETH Price quick-view */}
-          {ethPrice > 0 && (
-            <div className="ml-auto flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-1.5">
-              <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">ETH</span>
-              <span className="text-sm font-mono font-bold text-white">{formatUsd(ethPrice)}</span>
-              {ethChange24h !== null && (
-                <span className={`text-[11px] font-bold font-mono ${ethChange24h >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {ethChange24h >= 0 ? '+' : ''}{ethChange24h.toFixed(2)}%
-                </span>
-              )}
-            </div>
-          )}
+          {/* Live market price — labelled and ticking, not a stale snapshot */}
+          <EthPriceTicker price={ethPrice} change24h={ethChange24h} updatedAt={priceData?.updatedAt} />
         </div>
 
         {/* ── Borrower View ── */}

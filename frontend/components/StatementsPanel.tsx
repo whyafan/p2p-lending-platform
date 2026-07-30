@@ -23,6 +23,7 @@ import {
   type StatementRole,
 } from '../lib/statements';
 import { FileText, Download, Loader2 } from 'lucide-react';
+import { useHydrated } from '../hooks/useHydrated';
 
 type LoanTermsTuple = {
   loanContract: `0x${string}`;
@@ -37,7 +38,11 @@ type LoanTermsTuple = {
 };
 
 export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice: number }) {
-  const { address } = useAccount();
+  // Same rehydration caveat as the dashboards: don't tell an already-connected
+  // user to connect while wagmi is still restoring the session.
+  const { address, isConnecting, isReconnecting } = useAccount();
+  const hydrated = useHydrated();
+  const walletSettling = !hydrated || isConnecting || isReconnecting;
   const chainId = sepolia.id;
   const factoryAddress = process.env.NEXT_PUBLIC_LOAN_FACTORY_ADDRESS_SEPOLIA;
   const [role, setRole] = useState<StatementRole>('lender');
@@ -185,7 +190,9 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
       </div>
 
       <p className="text-[11px] text-slate-600 mb-4">
-        {!address ? (
+        {walletSettling ? (
+          'Restoring your wallet connection…'
+        ) : !address ? (
           'Connect a wallet to generate statements.'
         ) : isLoading ? (
           <span className="flex items-center gap-1.5">

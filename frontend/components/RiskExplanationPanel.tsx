@@ -98,35 +98,35 @@ const TIER_SUMMARY: Record<string, { Icon: IconComponent; headline: string; deta
     Icon: Trophy,
     headline: 'Excellent standing, lowest rates!',
     detail: 'You look great to lenders. You get the best interest rate and can borrow more relative to your collateral.',
-    color: 'text-emerald-700',
-    iconColor: 'text-emerald-600',
-    bg: 'bg-emerald-50',
-    border: 'border-emerald-200',
+    color: 'text-emerald-400',
+    iconColor: 'text-emerald-400',
+    bg: 'bg-emerald-500/10',
+    border: 'border-emerald-500/30',
   },
   B: {
     Icon: ThumbsUp,
     headline: 'Good standing, standard rates',
     detail: 'Solid profile with some room to grow. You get reasonable rates and can still borrow comfortably.',
-    color: 'text-amber-700',
-    iconColor: 'text-amber-600',
-    bg: 'bg-amber-50',
-    border: 'border-amber-200',
+    color: 'text-amber-400',
+    iconColor: 'text-amber-400',
+    bg: 'bg-amber-500/10',
+    border: 'border-amber-500/30',
   },
   C: {
     Icon: AlertTriangle,
     headline: 'High-risk profile, higher rates',
     detail: 'Lenders see more risk here. You\'ll pay a higher interest rate and need more collateral to borrow.',
-    color: 'text-red-700',
-    iconColor: 'text-red-600',
-    bg: 'bg-red-50',
-    border: 'border-red-200',
+    color: 'text-red-400',
+    iconColor: 'text-red-400',
+    bg: 'bg-red-500/10',
+    border: 'border-red-500/30',
   },
 };
 
 function statusFor(score: number): { label: string; color: string; dot: string } {
-  if (score >= 0.3) return { label: 'Great', color: 'text-emerald-600', dot: 'bg-emerald-500' };
-  if (score >= -0.1) return { label: 'OK', color: 'text-amber-600', dot: 'bg-amber-400' };
-  return { label: 'Concern', color: 'text-red-600', dot: 'bg-red-500' };
+  if (score >= 0.3) return { label: 'Great', color: 'text-emerald-400', dot: 'bg-emerald-500' };
+  if (score >= -0.1) return { label: 'OK', color: 'text-amber-400', dot: 'bg-amber-400' };
+  return { label: 'Concern', color: 'text-red-400', dot: 'bg-red-500' };
 }
 
 function SimpleBar({ score }: { score: number }) {
@@ -134,7 +134,7 @@ function SimpleBar({ score }: { score: number }) {
   const color = score >= 0.3 ? '#10b981' : score >= -0.1 ? '#f59e0b' : '#ef4444';
   return (
     <div className="flex items-center gap-2">
-      <div className="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+      <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
         <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: color }} />
       </div>
     </div>
@@ -147,14 +147,14 @@ function FeatureRow({ c }: { c: FeatureContribution }) {
   if (!meta) return null;
 
   return (
-    <div className="py-3 border-b border-slate-100 last:border-0">
+    <div className="py-3 border-b border-slate-800 last:border-0">
       <div className="flex items-start gap-3">
         <div className="flex-shrink-0 pt-0.5">
-          <meta.Icon className="h-5 w-5 text-slate-400" />
+          <meta.Icon className="h-5 w-5 text-slate-500" />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2 mb-0.5">
-            <p className="text-sm font-bold text-slate-800 leading-snug">{meta.plainName}</p>
+            <p className="text-sm font-bold text-white leading-snug">{meta.plainName}</p>
             <div className="flex items-center gap-1.5 flex-shrink-0">
               <span className={`h-2 w-2 rounded-full flex-shrink-0 ${status.dot}`} />
               <span className={`text-xs font-bold ${status.color}`}>{status.label}</span>
@@ -180,7 +180,7 @@ export function RiskExplanationPanel({ explanation, personaName }: Props) {
   const offChain = contributions.filter((c) => c.category === 'off-chain');
 
   return (
-    <div className="bg-white p-5 space-y-4">
+    <div className="bg-[#111827] p-5 space-y-4">
 
       {/* Overall grade */}
       <div className={`rounded-xl border ${tierInfo.border} ${tierInfo.bg} p-4`}>
@@ -188,13 +188,13 @@ export function RiskExplanationPanel({ explanation, personaName }: Props) {
           <tierInfo.Icon className={`h-8 w-8 flex-shrink-0 ${tierInfo.iconColor}`} />
           <div className="flex-1">
             <div className="flex items-center gap-2 mb-0.5">
-              <span className="text-lg font-black text-slate-800">Grade: {tier}</span>
+              <span className="text-lg font-black text-white">Grade: {tier}</span>
               <span className={`text-sm font-bold ${tierInfo.color}`}>{tierInfo.headline}</span>
             </div>
-            <p className="text-xs text-slate-600 leading-relaxed">{tierInfo.detail}</p>
+            <p className="text-xs text-slate-500 leading-relaxed">{tierInfo.detail}</p>
           </div>
         </div>
-        <p className="text-[10px] text-slate-400 mt-2 font-medium uppercase tracking-wider">
+        <p className="text-[10px] text-slate-500 mt-2 font-medium uppercase tracking-wider">
           For: {personaName} &bull; Score: {overallScore >= 0 ? '+' : ''}{overallScore.toFixed(3)} (A &ge; {TIER_THRESHOLDS.A} &middot; B &ge; {TIER_THRESHOLDS.B} &middot; C below)
         </p>
       </div>
@@ -202,16 +202,16 @@ export function RiskExplanationPanel({ explanation, personaName }: Props) {
       {/* On-chain signals */}
       <div>
         <div className="flex items-center gap-2 mb-2">
-          <div className="h-px flex-1 bg-slate-100" />
+          <div className="h-px flex-1 bg-slate-800" />
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <LinkIcon className="h-3 w-3 text-slate-400" />
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+            <LinkIcon className="h-3 w-3 text-slate-500" />
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
               Blockchain signals
             </p>
           </div>
-          <div className="h-px flex-1 bg-slate-100" />
+          <div className="h-px flex-1 bg-slate-800" />
         </div>
-        <p className="text-[11px] text-slate-400 mb-3 text-center">
+        <p className="text-[11px] text-slate-500 mb-3 text-center">
           Pulled directly from your on-chain activity. These cannot be faked.
         </p>
         <div>
@@ -222,16 +222,16 @@ export function RiskExplanationPanel({ explanation, personaName }: Props) {
       {/* Off-chain signals */}
       <div>
         <div className="flex items-center gap-2 mb-2">
-          <div className="h-px flex-1 bg-slate-100" />
+          <div className="h-px flex-1 bg-slate-800" />
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <FileText className="h-3 w-3 text-slate-400" />
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+            <FileText className="h-3 w-3 text-slate-500" />
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
               Personal info (self-reported)
             </p>
           </div>
-          <div className="h-px flex-1 bg-slate-100" />
+          <div className="h-px flex-1 bg-slate-800" />
         </div>
-        <p className="text-[11px] text-slate-400 mb-3 text-center">
+        <p className="text-[11px] text-slate-500 mb-3 text-center">
           You provided this info. Being accurate gets you better terms.
         </p>
         <div>
@@ -240,30 +240,30 @@ export function RiskExplanationPanel({ explanation, personaName }: Props) {
       </div>
 
       {/* Technical breakdown */}
-      <div className="border-t border-slate-100 pt-3">
+      <div className="border-t border-slate-800 pt-3">
         <button
           type="button"
           onClick={() => setShowTechDetails((v) => !v)}
-          className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-slate-600 transition-colors"
+          className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 hover:text-slate-500 transition-colors"
         >
           <span>{showTechDetails ? '▼' : '▶'}</span>
           Show technical score details
         </button>
 
         {showTechDetails && (
-          <div className="mt-3 rounded-lg bg-slate-50 p-3 space-y-2">
+          <div className="mt-3 rounded-lg bg-slate-900/50 p-3 space-y-2">
             <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Score formula</p>
-            <p className="text-[11px] font-mono text-slate-600 break-all">
+            <p className="text-[11px] font-mono text-slate-500 break-all">
               {contributions.map((c) => `(${(c.weight * 100).toFixed(0)}%×${(c.score >= 0 ? '+' : '')}${c.score.toFixed(2)})`).join(' + ')}
             </p>
-            <p className="text-[11px] font-mono font-bold text-slate-800">
+            <p className="text-[11px] font-mono font-bold text-white">
               = {overallScore.toFixed(4)} &rarr; Tier {tier}
             </p>
-            <div className="grid grid-cols-2 gap-1 pt-1 border-t border-slate-200">
+            <div className="grid grid-cols-2 gap-1 pt-1 border-t border-slate-800">
               {contributions.map((c) => (
                 <div key={c.feature} className="text-[10px] text-slate-500 flex justify-between pr-2">
                   <span>{c.feature}</span>
-                  <span className={`font-mono font-bold ${c.score >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                  <span className={`font-mono font-bold ${c.score >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {(c.score >= 0 ? '+' : '')}{c.score.toFixed(2)}
                   </span>
                 </div>

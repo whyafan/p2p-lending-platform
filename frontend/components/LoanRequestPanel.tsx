@@ -960,7 +960,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                   What went into your score: {evalMode === 'persona' ? 'demo data' : 'your wallet'}
                 </p>
               </div>
-              <div className="bg-white">
+              <div className="bg-[#111827]">
                 <RiskExplanationPanel
                   explanation={riskExpl}
                   personaName={evalMode === 'persona' ? (selectedPersona?.displayName ?? 'Profile') : 'My Wallet'}
