@@ -244,6 +244,13 @@ Settings page gains a Statements section. Note that the price *at the time of ea
 
 ## 🔭 Also queued
 
+- **Cancel a loan request before it's funded — no Cancel button exists in the borrower UI.**
+
+  **The gap:** a borrower who posts a request and changes their mind (wrong amount, wrong term, found funding elsewhere) has no way out. The request sits in the marketplace with their collateral locked until the 7-day funding window expires. Nothing in `BorrowerLoansSection.tsx` calls `cancel()` — the borrower's `Requested` loan cards render terms and a funding countdown only.
+
+  **To build:** a Cancel button on each `Requested` loan card in `BorrowerLoansSection.tsx`, wired with the same `useWriteContract` / `useWaitForTransactionReceipt` pattern already used for repay. Needs a confirm step (irreversible), copy stating the collateral comes straight back, and an Etherscan link on success to match the rest of the app. `cancel` also has to be added to the shared `LOAN_ABI` in `lib/loan-abi.ts` — it isn't there yet. The button must not render for any status other than `Requested`, and it's worth re-reading `status` at click time rather than trusting the 5s-polled value: a lender can fund in the gap between render and confirmation, and the tx then reverts with `"Loan: cannot cancel"`, which should surface as a plain "this loan was just funded" message rather than a raw revert string.
+
+  **Frontend-only — no contract change, no redeploy.** `cancel()` (`Loan.sol:217`) already exists: `onlyBorrower`, requires `status == Requested`, releases collateral to the borrower, emits `LoanCancelled`. The event is already decoded in `lib/loan-events.ts` and `Cancelled` is already in both dashboards' `STATUS_LABEL`, so history and receipts pick it up for free once the button ships.
 - **Multi-lender pooling (1:N funding)** — several lenders contribute partial amounts to one loan; pro-rata repayment. Explicitly called "MVP-feasible" in the lender-journey doc. Biggest remaining architectural gap.
 
 ---
