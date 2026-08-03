@@ -27,12 +27,18 @@ export async function POST(req: NextRequest) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       // 20-second timeout — chain fetching can be slow on first call
+      // Generous because the backend fans out to six Alchemy queries and a cold
+      // LightGBM load. Without a timeout at all, an unreachable backend would hang the
+      // wizard on a request that never resolves instead of falling through below.
       signal: AbortSignal.timeout(20_000),
     });
 
     if (!upstream.ok) {
       const text = await upstream.text();
       // Surface the backend error but don't expose stack traces
+      // Truncated rather than dropped: a FastAPI 502 carries the Alchemy failure that
+      // caused it, which is the one thing worth seeing, while the traceback below it is
+      // internal detail this route has no business returning to a browser.
       return NextResponse.json(
         { error: `Backend error ${upstream.status}`, detail: text.slice(0, 300) },
         { status: upstream.status },

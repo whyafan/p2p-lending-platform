@@ -26,6 +26,8 @@ export async function GET(req: Request) {
   return NextResponse.json({ error: 'Sign in required' }, { status: 401 });
 }
 
+// 410 rather than 404: the endpoint existed and was removed, and an old client that
+// still calls it should be told that rather than left guessing at a routing mistake.
 export async function POST() {
   return NextResponse.json(
     { error: 'Profile updates moved to /onboarding and Supabase auth.' },
@@ -33,6 +35,9 @@ export async function POST() {
   );
 }
 
+// Allowlist rather than a type assertion: userRole comes off a request body and is
+// written straight into the column the UI gates on, so an unchecked value would let a
+// caller invent a role that no gate recognises and none of them refuse either.
 const VALID_ROLES = ['borrower', 'lender', 'both'] as const;
 
 export async function PATCH(req: Request) {

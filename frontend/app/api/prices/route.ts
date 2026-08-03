@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import { SUPPORTED_TOKENS } from '../../../lib/tokens';
 
+// 30s server-side cache. CoinGecko's free tier is rate limited per IP, and every
+// browser session polls this every 10s, so without the cache a handful of concurrent
+// users would exhaust the quota between them. The client polls faster than this
+// revalidates on purpose: it costs nothing and the price updates as soon as it can.
 export const revalidate = 30;
 
 // Coins shown in the marquee ticker (symbol → coingecko id)
@@ -19,6 +23,9 @@ const TICKER_COINS: Record<string, string> = {
 const TICKER_IDS = Object.values(TICKER_COINS);
 
 export async function GET() {
+  // The tokens the app prices and the coins the ticker displays are merged into a
+  // single upstream call. They overlap, hence the dedupe, and CoinGecko charges by
+  // request rather than by id, so one wide call is strictly cheaper than two.
   const appIds = [...new Set(SUPPORTED_TOKENS.map((t) => t.coingeckoId))];
   const allIds = [...new Set([...appIds, ...TICKER_IDS])].join(',');
 
@@ -61,6 +68,10 @@ export async function GET() {
   } catch (error) {
     console.error('Price fetch failed', error);
 
+    // Static fallback rather than an error, and the response says so via source:
+    // 'fallback'. A dead price feed would otherwise take down the term sheet, the
+    // dashboards and statement valuation all at once, none of which need the price to
+    // be current so much as present. Callers that care can check the source field.
     const fallbackEth = Number(process.env.NEXT_PUBLIC_ETH_USD_PRICE ?? '2500');
     const fallbackWbtc = Number(process.env.NEXT_PUBLIC_WBTC_USD_PRICE ?? '95000');
     const fallbackUsdc = Number(process.env.NEXT_PUBLIC_USDC_USD_PRICE ?? '1');

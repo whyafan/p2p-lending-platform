@@ -13,6 +13,9 @@ export async function DELETE(req: NextRequest) {
     const admin = createAdminClient() ?? session.serverClient;
 
     // Confirm the wallet belongs to this user before deleting
+    // The admin client bypasses row level security, so the user_id filter here is the
+    // only thing scoping this to the caller. Every query in this file that runs through
+    // `admin` carries that filter for the same reason.
     const { data: wallet } = await admin
       .from('linked_wallets')
       .select('id, is_primary, user_id')
@@ -25,6 +28,9 @@ export async function DELETE(req: NextRequest) {
     await admin.from('linked_wallets').delete().eq('id', walletId);
 
     // If the deleted wallet was primary, promote the earliest remaining wallet
+    // Oldest rather than newest, on the assumption that the wallet a user has held
+    // longest is the safer default. The alternative is an account with wallets but no
+    // primary, which reads as "no wallet linked" everywhere downstream.
     if (wallet.is_primary) {
       const { data: remaining } = await admin
         .from('linked_wallets')
@@ -44,6 +50,13 @@ export async function DELETE(req: NextRequest) {
   }
 }
 
+/**
+ * The whole account picture in one call: wallets, screening history and profile.
+ *
+ * Bundled deliberately, because useCompliance needs all three to decide what the user
+ * may do, and three separate requests would let the UI render against a half-loaded
+ * permission state.
+ */
 export async function GET() {
   try {
     const session = await getSessionUser();
@@ -68,6 +81,9 @@ export async function GET() {
         .limit(20),
     ]);
 
+    // Rows are remapped to camelCase rather than returned as-is, so the database
+    // column names are not part of the API surface and can change without breaking
+    // every consumer of this route.
     const wallets = (walletsRes.data ?? []).map((w) => ({
       id: w.id,
       userId: w.user_id,

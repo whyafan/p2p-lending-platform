@@ -19,7 +19,13 @@ const FEEDS = [
   { url: 'https://decrypt.co/feed', source: 'Decrypt', category: 'Web3' },
 ];
 
+// Regex parsing rather than an XML library. These are three known feeds whose shape
+// does not vary, the payload is read-only and never rendered as markup, and the
+// alternative is a dependency for one route. It is not a general RSS parser: a feed
+// outside FEEDS would likely need its own handling.
 function extractTag(xml: string, tag: string): string {
+  // CDATA is tried first because a title wrapped in CDATA also matches the plain
+  // pattern, and the plain match would return the CDATA wrapper as part of the text.
   const cdataRe = new RegExp(`<${tag}[^>]*>\\s*<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>\\s*</${tag}>`, 'i');
   const plainRe = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i');
   const cdata = cdataRe.exec(xml);
@@ -57,6 +63,8 @@ function parseRss(xml: string, source: string, defaultCategory: string): NewsArt
     const cat = extractTag(chunk, 'category');
     if (cat && cat !== defaultCategory) categories.push(cat.split('/').pop()?.trim() ?? cat);
 
+    // An item with no title or no link is unusable in the UI, and a headline that
+    // renders as an empty card is worse than one article fewer.
     if (!title || !url) continue;
 
     const publishedAt = pubDateStr ? Math.floor(new Date(pubDateStr).getTime() / 1000) : Math.floor(Date.now() / 1000);
@@ -77,6 +85,9 @@ function parseRss(xml: string, source: string, defaultCategory: string): NewsArt
 }
 
 export async function GET() {
+  // allSettled, not all: one feed being down or slow must not empty the news panel.
+  // Whatever came back is used, and the short timeout bounds how long a hanging feed
+  // can delay the other two.
   const results = await Promise.allSettled(
     FEEDS.map(async ({ url, source, category }) => {
       const res = await fetch(url, {
@@ -96,6 +107,9 @@ export async function GET() {
   }
 
   // Sort newest first, de-dupe by url, take top 25
+  // Sorted before de-duping, so when the same URL appears in two feeds the copy that
+  // survives is the one carrying the later timestamp rather than whichever feed
+  // happened to resolve first.
   const seen = new Set<string>();
   const articles = all
     .sort((a, b) => b.publishedAt - a.publishedAt)

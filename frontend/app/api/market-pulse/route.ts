@@ -9,6 +9,9 @@ export interface MarketPulse {
   fetchedAt: number;
 }
 
+// All three fetchers return null on any failure rather than throwing. These are three
+// unrelated third parties behind one panel, and the response type is nullable per field
+// so the UI can hide the one that is unavailable instead of losing the whole bar.
 async function fetchFearGreed(): Promise<{ value: number; label: string } | null> {
   try {
     const res = await fetch('https://api.alternative.me/fng/?limit=1', {
@@ -33,6 +36,9 @@ async function fetchDefiTvl(): Promise<number | null> {
     });
     if (!res.ok) return null;
     const arr = await res.json() as Array<{ tvl: number }>;
+    // The endpoint returns the full history and the panel wants today's figure, so only
+    // the last point is used. Cheaper to discard here than to find a current-value
+    // endpoint that reports the same number on the same basis.
     const last = arr.at(-1);
     return last ? last.tvl / 1e9 : null; // convert to billions
   } catch {
@@ -46,6 +52,8 @@ async function fetchEthGas(): Promise<number | null> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_gasPrice', params: [], id: 1 }),
+      // Shortest timeout of the three: gas is the most time-sensitive figure here, and
+      // a stale one is worth less than the two seconds of latency it would cost.
       signal: AbortSignal.timeout(4000),
     });
     if (!res.ok) return null;
