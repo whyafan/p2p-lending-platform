@@ -90,6 +90,14 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         emit CollateralLocked(loanId, borrower, loanContract, msg.value);
     }
 
+    /// @notice Return the whole position to `recipient` and close it.
+    /// @dev Called by the Loan on full repayment or cancellation. The released and
+    ///      liquidated flags are checked together so the two exits are mutually
+    ///      exclusive, not just individually one-shot.
+    /// @param loanId Position to release.
+    /// @param recipient Address to send the collateral to (the borrower, in practice).
+    /// Reverts unless called by this loan's own contract, and unless the position is
+    /// still open and the recipient is non-zero.
     function releaseCollateral(uint256 loanId, address payable recipient)
         external
         onlyLoan(loanId)
@@ -101,6 +109,9 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         require(!position.liquidated, "CollateralVault: already liquidated");
         require(recipient != address(0), "CollateralVault: recipient is zero address");
 
+        // Position is zeroed and flagged before the transfer: sendValue hands control
+        // to the recipient, and the guard plus the cleared amount mean a re-entrant
+        // call finds nothing left to withdraw.
         uint256 amount = position.amount;
         position.released = true;
         position.amount = 0;
@@ -116,6 +127,11 @@ contract CollateralVault is Ownable, ReentrancyGuard {
     ///      contract now passes exactly what covers the outstanding balance and
     ///      whatever is left over goes back to the borrower in the same call.
     ///      Still one-shot: the position closes here, it is not drawn down twice.
+    /// @param loanId Position to liquidate.
+    /// @param recipient Address receiving the seized portion (the lender).
+    /// @param seizeAmount Wei to seize; the remainder goes to the recorded borrower.
+    /// Reverts unless called by this loan's own contract, and unless the position is
+    /// still open, the recipient is non-zero and seizeAmount fits within the position.
     function liquidateCollateral(uint256 loanId, address payable recipient, uint256 seizeAmount)
         external
         onlyLoan(loanId)
@@ -130,6 +146,8 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         uint256 total = position.amount;
         require(seizeAmount <= total, "CollateralVault: seize exceeds collateral");
 
+        // Refund goes to the borrower recorded at lock time, never to a caller-supplied
+        // address, so a compromised Loan still cannot redirect the surplus.
         address payable borrower = payable(position.borrower);
         uint256 refund = total - seizeAmount;
 
