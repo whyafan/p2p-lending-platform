@@ -1,5 +1,9 @@
 import { network } from "hardhat";
 
+// Predates the Ignition module and has not tracked the contracts since: LoanFactory
+// now takes (vault, priceFeed, demoMode) and this passes only the vault, so a run
+// fails on the constructor. Kept because npm run deploy:local and deploy:ephemeral
+// still point at it. Use deploy:ignition:local for a working deployment.
 async function main() {
   const { viem } = await network.connect();
   const publicClient = await viem.getPublicClient();

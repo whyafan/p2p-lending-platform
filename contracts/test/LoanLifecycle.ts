@@ -4,6 +4,9 @@ import { describe, it } from "node:test";
 import { network } from "hardhat";
 import { getAddress, parseEther } from "viem";
 
+// Reads one field of a returned struct by position or by name. viem hands back a
+// tuple or a named object depending on whether the compiled ABI kept the component
+// names, so both shapes have to be accepted for the same read to work either way.
 function getStructValue<T>(record: unknown, index: number, key: string): T {
   const value = Array.isArray(record)
     ? record[index]
@@ -34,6 +37,9 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
   const publicClient = await viem.getPublicClient();
   const [deployer, borrower, lender] = await viem.getWalletClients();
 
+  // One fixture shared by every test in this file, chosen so the arithmetic is
+  // checkable by hand: 1 ETH against 2 ETH at $2,000 is 50% LTV, and 70% + 10%
+  // puts the liquidation threshold at 80%, i.e. exactly $1,250/ETH.
   const principalAmount = parseEther("1");
   const collateralAmount = parseEther("2");
   const durationDays = 30n;
@@ -41,6 +47,8 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
   const maxLtvBps = 7_000n;
   const liquidationBufferBps = 1_000n;
 
+  // Deploys the full stack fresh per test rather than reusing one deployment, so a
+  // test that liquidates or repays cannot leave state behind for the next one.
   async function deployFundedLoan() {
     const collateralVault = await viem.deployContract("CollateralVault", [], {
       client: { wallet: deployer, public: publicClient },

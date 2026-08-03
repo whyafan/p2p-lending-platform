@@ -6,6 +6,9 @@ import { getAddress, parseEther } from "viem";
 
 const INITIAL_PRICE = 2_000n; // $2,000/ETH
 
+// Reads one field of a returned struct by position or by name. viem hands back a
+// tuple or a named object depending on whether the compiled ABI kept the component
+// names, so both shapes have to be accepted for the same read to work either way.
 function getStructValue<T>(record: unknown, index: number, key: string): T {
   const value = Array.isArray(record)
     ? record[index]
@@ -14,6 +17,8 @@ function getStructValue<T>(record: unknown, index: number, key: string): T {
   return value as T;
 }
 
+// Covers creation and funding only. Everything after funding lives in
+// LoanLifecycle.ts.
 describe("NexusFi Milestone 1", async function () {
   const { viem } = await network.connect();
   const publicClient = await viem.getPublicClient();
@@ -44,6 +49,9 @@ describe("NexusFi Milestone 1", async function () {
   it("creates a loan request and locks borrower collateral", async function () {
     const { collateralVault, loanFactory } = await deployMilestoneContracts();
 
+    // Principal is larger than the collateral: createLoan checks only the structural
+    // bounds, never principal against collateral value, so this is a valid request as
+    // far as the factory is concerned. Sizing is the client's job, via loan-terms.ts.
     const principalAmount = parseEther("5");
     const collateralAmount = parseEther("2");
     const durationDays = 30n;

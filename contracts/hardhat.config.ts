@@ -17,6 +17,10 @@ export default defineConfig({
     blockscout: { enabled: true },
   },
   solidity: {
+    // Two profiles rather than one optimised setting: the default keeps compiles fast
+    // and traces readable for tests, and production is what Ignition deploys with.
+    // Verification has to be run with --build-profile production or the bytecode the
+    // explorer recompiles will not match what is on chain.
     profiles: {
       default: {
         version: "0.8.28",
@@ -49,6 +53,9 @@ export default defineConfig({
     sepolia: {
       type: "http",
       chainType: "l1",
+      // Public fallback so the network is usable for reads without any .env setup.
+      // Deploys still need SEPOLIA_PRIVATE_KEY; with no key the accounts list is
+      // empty and Hardhat fails on the signer rather than on the RPC.
       url: process.env.SEPOLIA_RPC_URL ?? "https://sepolia.drpc.org",
       accounts: process.env.SEPOLIA_PRIVATE_KEY ? [process.env.SEPOLIA_PRIVATE_KEY] : [],
     },
