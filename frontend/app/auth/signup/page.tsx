@@ -40,6 +40,10 @@ export default function SignupPage() {
       return;
     }
 
+    // signUp succeeding does not mean the user is signed in: with email confirmation
+    // enabled Supabase creates the account but issues no session. The presence of a
+    // session is what distinguishes the two, and sending an unconfirmed user to
+    // onboarding would land them on a page that immediately bounces them back.
     const { data } = await supabase.auth.getSession();
     if (!data.session) {
       setError('Check your email for a confirmation link, then sign in.');

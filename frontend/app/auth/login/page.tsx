@@ -26,6 +26,9 @@ export default function LoginPage() {
       return;
     }
     sessionStorage.setItem('nexusfi_login_success', '1');
+    // Full navigation rather than a router push. The session cookie was just written by
+    // the Supabase client, and only a fresh request runs it through middleware, so this
+    // is what makes the server render the landing page as signed in on first paint.
     window.location.replace('/');
   }
 

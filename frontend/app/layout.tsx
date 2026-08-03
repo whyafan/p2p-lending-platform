@@ -18,6 +18,11 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Reconstructs wagmi's connection state from the cookie so the server renders the
+  // page as connected for a user who already is. Without it the first paint is always
+  // the disconnected variant, and every reload flashes a "connect a wallet" prompt at
+  // someone whose wallet is connected. This is why wagmi-config uses cookieStorage:
+  // localStorage would be invisible here.
   const initialState = cookieToInitialState(getConfig(), (await headers()).get('cookie'));
 
   return (

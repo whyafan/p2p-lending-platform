@@ -29,6 +29,10 @@ export default function ResetPasswordPage() {
     }
     // The recovery session is established asynchronously from the URL fragment,
     // so listen for it as well as checking what's already there.
+    // Checking only getSession races the fragment parse and shows "invalid link" on a
+    // link that is fine; listening only would never resolve for a session that was
+    // already established. Both are needed, and the getSession result below is written
+    // through a functional update so it cannot overwrite a true from the listener.
     const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session) setReady(true);
     });

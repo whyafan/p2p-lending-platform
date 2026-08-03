@@ -235,6 +235,11 @@ export default function AppPage() {
   const [activePersona, setActivePersona] = useState<BorrowerPersona | null>(null);
   const [pendingLoanCount, setPendingLoanCount] = useState(0);
 
+  // The gate for this whole route. Two distinct redirects, because an unauthenticated
+  // visitor and a signed-in user who has not finished onboarding need different next
+  // steps. replace rather than push, so neither can be reached again with the back
+  // button. Waits on isLoading first: redirecting on an unresolved query would bounce
+  // every user out on their first render.
   useEffect(() => {
     if (compliance.isLoading) return;
     if (!compliance.data?.authenticated) { router.replace('/'); return; }
@@ -257,6 +262,9 @@ export default function AppPage() {
         if (!res.ok) return;
         const { latest } = await res.json();
         if (cancelled || !latest) return;
+        // Functional updates that yield to whatever is already there. This request can
+        // land after the user has scored a fresh profile in the wizard, and a stored
+        // assessment from an earlier session must not overwrite a live one.
         setBorrowerTier((prev) => prev ?? latest.tier);
         setBorrowerScore((prev) => (prev === null ? latest.overallScore : prev));
       } catch {
@@ -289,6 +297,8 @@ export default function AppPage() {
   async function activateLending() {
     setIsActivatingRole(true);
     try {
+      // 'both', never 'lender': this is reachable only from the borrower workspace, so
+      // the user already borrows and is adding lending rather than switching to it.
       await fetch('/api/profile', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -304,9 +314,15 @@ export default function AppPage() {
   async function signOut() {
     const supabase = createClient();
     if (supabase) await supabase.auth.signOut();
+    // Full page replace rather than router.replace: this discards the React Query cache
+    // and every wagmi connection along with it, so nothing from the previous session
+    // survives into the next one.
     window.location.replace('/');
   }
 
+  // Rendered while the redirect effect above is still deciding, and for the frame
+  // between a failed check and the navigation actually happening. Without it the
+  // dashboard paints for an instant before being replaced.
   if (compliance.isLoading || !compliance.data?.canBorrow) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#0a0e1a]">

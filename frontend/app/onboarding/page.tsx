@@ -84,6 +84,8 @@ export default function OnboardingPage() {
       if (sessionId) setDiditSessionId(sessionId);
       if (returnedStatus) setDiditReturnedStatus(returnedStatus);
       setIsKycReturn(true);
+      // Parameters are lifted into state and then stripped from the address bar, so a
+      // reload or a shared link does not replay a stale verification result.
       window.history.replaceState({}, '', '/onboarding');
     }
   }, []);
@@ -97,6 +99,11 @@ export default function OnboardingPage() {
     await compliance.refetch();
   }, [compliance, diditSessionId, diditReturnedStatus]);
 
+  // Polls only in the window right after the user returns from Didit, because the
+  // verdict arrives by webhook and may not have landed by the time they are back on
+  // this page. Three seconds is fast enough that approval feels immediate; the
+  // 90-second cap stops the page polling forever for a verdict that is being reviewed
+  // manually, and hands the user the explicit check button instead.
   useEffect(() => {
     if (!isKycReturn || !compliance.data?.authenticated || compliance.data?.kycApproved) return;
     const interval = setInterval(() => { void syncAndRefetch(); }, 3000);
@@ -115,6 +122,9 @@ export default function OnboardingPage() {
     }
   }, [compliance.data?.kycApproved]);
 
+  // One catch-up check for a user who left mid-verification and came back later, by
+  // any route rather than through the callback. Guarded by hasAutoChecked so it fires
+  // once per mount: without that, every compliance refetch would trigger another.
   useEffect(() => {
     if (hasAutoChecked) return;
     if (isKycReturn) return;
@@ -126,6 +136,10 @@ export default function OnboardingPage() {
     void syncAndRefetch();
   }, [compliance.data, hasAutoChecked, isKycReturn, syncAndRefetch]);
 
+  // Step is derived from compliance state on every change rather than advanced by the
+  // buttons. The user's real position is whatever the server says it is, so a step
+  // completed in another tab, or a KYC approval that arrives by webhook, moves the
+  // wizard forward on its own and no local counter can drift out of step with it.
   useEffect(() => {
     if (!compliance.data?.authenticated) { setStep('account'); return; }
     if (!compliance.data.hasRole) { setStep('role'); return; }
@@ -134,6 +148,13 @@ export default function OnboardingPage() {
     setStep('ready');
   }, [compliance.data]);
 
+  /**
+   * The wallet linking handshake: ask the server for a challenge, sign it, send it back.
+   *
+   * The message is used exactly as the server returned it. Reconstructing it client-side
+   * would be the obvious shortcut and would break verification, since the server checks
+   * that the signed text contains the nonce it issued.
+   */
   const verifyWallet = useCallback(async () => {
     if (!address || !chainId) { setStatus('Connect a wallet first.'); return; }
     setStatus('Requesting signature…');

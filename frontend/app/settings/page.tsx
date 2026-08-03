@@ -119,6 +119,9 @@ export default function SettingsPage() {
   const kycStatus = user?.kycStatus ?? 'NOT_STARTED';
   const currentRole = user?.userRole ?? null;
 
+  // Requires signatureVerified, so a wallet whose linking was started but never signed
+  // does not block a second attempt. Compared lowercase because the stored address is
+  // normalised on the way in while wagmi hands back a checksummed one.
   const walletAlreadyLinked = Boolean(
     address && wallets.some((w) => w.walletAddress === address.toLowerCase() && w.signatureVerified)
   );
@@ -145,6 +148,9 @@ export default function SettingsPage() {
           chainId,
           message: nonceBody.message,
           signature,
+          // First wallet becomes primary automatically; later ones do not, since
+          // silently demoting the wallet a user already borrows from would change which
+          // address the rest of the app treats as theirs without them asking.
           setPrimary: wallets.length === 0,
         }),
       });
