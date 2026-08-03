@@ -35,6 +35,11 @@ async def score_borrower(req: ScoreRequest) -> ScoreResponse:
     oc = req.off_chain
 
     # ── 1. Fetch on-chain data ────────────────────────────────────────────────
+    # The one failure this endpoint refuses to absorb. Individual fetchers already
+    # degrade to zeros internally, so reaching here means the RPC itself is
+    # unreachable, and scoring a wallet as if it had no history would quietly hand
+    # the borrower a tier C. 502 rather than 500: the fault is upstream, and the
+    # wizard tells the user the service is unavailable instead of showing a tier.
     try:
         chain = await fetch_wallet_data(wallet, eth_price)
     except (httpx.HTTPError, Exception) as exc:
@@ -126,6 +131,10 @@ async def score_borrower(req: ScoreRequest) -> ScoreResponse:
     ]
 
     # ── 6. Warnings ───────────────────────────────────────────────────────────
+    # Surfaced alongside the tier rather than folded into it. The score already
+    # accounts for these through the feature vector; the strings exist so a lender
+    # reading the breakdown can see what drove it in words, and so a borrower is told
+    # when their result rests on missing data or a contradicted claim.
     warnings: list[str] = []
     if chain["wallet_age_days"] == 0:
         warnings.append("No mainnet transaction history found — wallet scored as new.")

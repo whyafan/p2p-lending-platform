@@ -128,6 +128,9 @@ def mixer_claim_status(
     Dishonesty = claimed "no mixer" but chain shows mixer usage.
     (Admitting mixer use when there's none is unusual but not penalised.)
     """
+    # Asymmetric on purpose: only the claim that hides real mixer activity counts as
+    # dishonesty. The opposite direction still fails `matches`, so it shows in the
+    # breakdown, but it carries no penalty because it costs the borrower to admit.
     matches = claimed_no_mixer == (not mixer_detected)
     dishonest = (claimed_no_mixer is True) and (mixer_detected is True)
     return matches, dishonest
@@ -147,11 +150,16 @@ def defi_claim_status(
     Overclaiming repayments or underclaiming liquidations = dishonesty.
     """
     # Allow small tolerance (+/-1) for honest approximation
+    # The tolerance is not just leniency: chain_repaid only covers Aave V3 over the
+    # last ~6 months, so a borrower recalling one extra loan is as likely to be right
+    # as lying, and the penalty for a false positive here is a whole tier.
     repaid_ok = abs(claimed_repaid - chain_repaid) <= 1
     liq_ok    = abs(claimed_liq - chain_liq) <= 1
     matches   = repaid_ok and liq_ok
 
     # Dishonesty = overclaiming repayments OR underclaiming liquidations
+    # Both directions are self-serving. Understating repayments or admitting extra
+    # liquidations only hurts the claimant, so neither is treated as a lie.
     dishonest = (claimed_repaid > chain_repaid + 1) or (claimed_liq < chain_liq - 1)
     return matches, dishonest
 
@@ -169,4 +177,7 @@ def dishonesty_penalty(mixer_lie: bool, defi_lie: bool) -> float:
         penalty += 0.70
     if defi_lie:
         penalty += 0.45
+    # Additive then clamped, so lying about both saturates at 1.0. Either lie alone
+    # leaves headroom; both together is treated as the worst case with no distinction
+    # beyond that, since there is nothing further the model needs to know.
     return min(1.0, penalty)

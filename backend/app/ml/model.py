@@ -24,11 +24,16 @@ class CreditScorer:
     def __init__(self) -> None:
         model_path = os.path.join(ARTIFACTS_DIR, "credit_model.pkl")
         label_path = os.path.join(ARTIFACTS_DIR, "label_map.pkl")
+        # Artifacts are produced by train.py and are not in the repo, so a fresh
+        # checkout has no model. Readiness is decided here, once, and drives the
+        # fallback path in score() instead of raising on the first request.
         self._ready = os.path.exists(model_path) and os.path.exists(label_path)
 
         if self._ready:
             self._model    = joblib.load(model_path)
             self._labels   = joblib.load(label_path)   # {0:'A', 1:'B', 2:'C'}
+            # shap is optional: without it the model still scores, it just cannot
+            # attribute. Losing explanations is worth less than losing the endpoint.
             try:
                 import shap
                 self._explainer = shap.TreeExplainer(self._model)
@@ -39,6 +44,9 @@ class CreditScorer:
             self._labels   = {0: "A", 1: "B", 2: "C"}
             self._explainer = None
 
+    # Process-wide singleton. Unpickling the booster and building the TreeExplainer
+    # are the expensive part of a score; doing it per request would dominate the
+    # response time and defeat the point of keeping the service warm.
     @classmethod
     def get(cls) -> "CreditScorer":
         if cls._instance is None:
@@ -73,6 +81,9 @@ class CreditScorer:
             overall_score = float(proba[0] - proba[2])
 
             # SHAP — per-class values for the predicted class
+            # Attribution is taken for the class actually predicted, not a fixed one:
+            # the features that argue for tier C are not the negation of those that
+            # argue for tier A, so explaining the wrong class would be misleading.
             shap_vals = [0.0] * len(FEATURE_NAMES)
             if self._explainer is not None:
                 try:
@@ -80,6 +91,8 @@ class CreditScorer:
                     class_sv = sv[pred_class][0]           # (10,)
                     shap_vals = [float(v) for v in class_sv]
                 except Exception:
+                    # Zeroed contributions rather than a failed score. The tier is
+                    # the answer the caller needs; the breakdown is supporting detail.
                     pass
 
             fallback_used = False
@@ -147,6 +160,11 @@ _FEATURE_SOURCES: dict[str, str] = {
     "dishonesty_penalty":  "claimed+verified",
 }
 
+# Display weights only. The trained model never sees these: a gradient-boosted tree
+# has no per-feature coefficient, so SHAP is what actually explains a prediction.
+# These exist so the UI can show a stable "how much does this feature normally
+# matter" figure next to the per-borrower attribution, and the rule-based fallback
+# below reuses them as real weights because it does need coefficients.
 _NOMINAL_WEIGHTS: dict[str, float] = {
     "wallet_age_days":     0.15,
     "tx_count":            0.10,
@@ -192,15 +210,23 @@ def _rule_based_fallback(fv: list[float]) -> tuple[str, float, float, list[float
     def s_liq(l: float) -> float:
         return -0.80 if l > 0 else 0.20
 
+    # Positional zip against the weights dict, which only lines up because
+    # _NOMINAL_WEIGHTS is declared in FEATURE_NAMES order. Reordering either one
+    # silently mis-weights every feature rather than raising.
     weights = list(_NOMINAL_WEIGHTS.values())
     raw_scores = [
         s_age(age), s_txs(txs), s_proto(proto), s_bal(log_bal),
         s_mixer(mixer), s_repaid(repaid), s_liq(liq),
+        # Income and employment arrive already credibility-adjusted and already on
+        # [-1, 1], so they pass through. Dishonesty is negated: the feature counts
+        # up toward deception while the score counts up toward creditworthiness.
         inc, emp, -dis,
     ]
     overall = sum(w * s for w, s in zip(weights, raw_scores))
     overall = max(-1.0, min(1.0, overall))
 
+    # Same cutoffs as the browser-side scorer in lib/risk-explainer.ts, so a borrower
+    # who sees tier B in persona mode is not handed a different tier by this path.
     if overall >= 0.40:
         tier, conf = "A", 0.75
     elif overall >= 0.00:
@@ -208,5 +234,7 @@ def _rule_based_fallback(fv: list[float]) -> tuple[str, float, float, list[float
     else:
         tier, conf = "C", 0.70
 
+    # Not real SHAP values, just each feature's share of the weighted sum. They have
+    # the same additive shape, so the UI renders both paths with one component.
     shap_approx = [w * s for w, s in zip(weights, raw_scores)]
     return tier, overall, conf, shap_approx
