@@ -478,3 +478,18 @@ Guards: `fastForward` requires the factory's `demoMode` (a deploy-time flag — 
 | `frontend/.env.local` | All frontend env vars (Supabase, RPC, contract addresses) |
 | `backend/` | Optional FastAPI credit-scoring service, called with fallback |
 | `docs/archive/` | Superseded docs + academic literature review, kept for reference |
+
+---
+
+## 🔧 Documentation/code mismatches to fix (found 2026-08-03 during README write)
+
+| # | Item | Detail | Action |
+|---|---|---|---|
+| D1 | **EIP-712 signing claimed but absent** | PLAN lists "EIP-712 typed term-sheet signing" as ✅ twice, but there is no `signTypedData`/`typedData` anywhere in `frontend/`. `submitLoan()` (`LoanRequestPanel.tsx:632`) calls `createLoan` directly. | Either build it or strike the claim from PLAN and the report. |
+| D2 | **Stale addresses in `.env.example`** | `frontend/.env.example` and `backend/.env.example` still list the abandoned 2026-05-18 deploy (`0xD4cfc8…`, `0x99Cb30…`, `0xC6faac…`). `backend/app/services/chain_fetcher.py:77` hardcodes the same stale factory as its default. | Update all three to the live `0x4dDB…` / `0xeB13…` / `0x5094…`. |
+| D3 | **Real Alchemy key committed** | `backend/.env.example:3` contains what looks like a live key, not a placeholder. | Rotate the key, replace with `YOUR_ALCHEMY_API_KEY`. |
+| D4 | **`scripts/deploy-milestone1.ts` is broken** | Deploys `LoanFactory` with 1 constructor arg; it now takes 3 (`vault`, `priceFeed`, `demoMode`), and the script never deploys `MockPriceFeed`. `npm run deploy:local` and `deploy:ephemeral` both fail. | Fix the script or delete it and point everything at the Ignition module. |
+| D5 | **Verification table addresses don't match anything** | The Blockscout links (`0x0C0B…`, `0x39d8…`, `0xf345…`) are a third address set, neither the live deploy nor the May one. | Re-verify the live three and update the table. |
+| D6 | **No frontend test script, no CI test run** | `frontend/package.json` has no `test` entry; `.github/workflows/deploy.yml` only deploys. Tests run today only via `node --experimental-strip-types --test lib/*.test.ts` (103 passing). | Add `"test"` script + a CI job running it and `npx hardhat test` (28 passing). |
+| D7 | **Backend fallback claim is wrong** | PLAN says `/api/credit/score` falls back to the rule-based scorer. The route returns `{fallback:true}`, but `confirmWalletScore()` only shows a warning and never scores locally. | Implement the local fallback, or correct the claim. |
+| D8 | **On-chain amounts decoupled from the term sheet** | `DEMO_MAX_COLLATERAL_ETH = 0.005` caps what is actually sent, so the USD loan the borrower configures is display-only. Undocumented outside the component. | Document it in the UI and PLAN, or scale it explicitly. |
