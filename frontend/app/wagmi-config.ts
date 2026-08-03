@@ -4,6 +4,9 @@ import { metaMask } from 'wagmi/connectors';
 
 type WagmiConfig = ReturnType<typeof createConfig>;
 
+// Stashed on globalThis rather than in a module-level const so it survives the module
+// re-evaluation that dev-mode hot reloading causes. A second config would mean a
+// second set of connectors and a wallet connection the running app no longer tracks.
 const globalForWagmi = globalThis as typeof globalThis & {
   __nexusfiWagmiConfig?: WagmiConfig;
 };
@@ -35,6 +38,9 @@ function createWagmiConfig() {
   return createConfig({
     chains: [hardhat, sepolia],
     connectors: buildConnectors(),
+    // MetaMask only. Discovery would surface every injected wallet in the browser, and
+    // the connector list then varies by machine, which makes a connection bug
+    // impossible to reproduce from a bug report.
     multiInjectedProviderDiscovery: false,
     ssr: true,
     // layout.tsx calls cookieToInitialState(), which can only see state that was

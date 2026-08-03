@@ -39,11 +39,26 @@ export type StatementMeta = {
 };
 
 const ETH = (w: bigint) => parseFloat(formatEther(w));
+// 8 decimals, not 18: enough that interest on a small loan is still visible, few
+// enough that a table column stays readable. Precision is lost only for display, the
+// arithmetic above stays in wei.
 const fmtEth = (w: bigint) => ETH(w).toFixed(8);
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
 const dt = (ts?: number) => (ts ? new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 19) : '—');
 
-/** Net position on one loan, from the perspective of `role`. */
+/**
+ * Net position on one loan, from the perspective of `role`.
+ *
+ * The two sides are not mirror images, because collateral only ever moves on the
+ * borrower's side. A lender's ledger is the principal out against repayments and any
+ * seizure in. The borrower's counts the collateral as an outflow when it is posted and
+ * as an inflow when it comes back, so a loan repaid in full nets to exactly the
+ * interest paid rather than to zero, and a liquidated one nets to the collateral that
+ * did not return.
+ *
+ * Read from events rather than from contract state, so the figures agree with the
+ * tradebook row for row and each one has a transaction hash behind it.
+ */
 export function computeLoanPnl(loan: StatementLoan, role: StatementRole) {
   const zero = BigInt(0);
   const repayments = loan.events.filter(
@@ -53,6 +68,9 @@ export function computeLoanPnl(loan: StatementLoan, role: StatementRole) {
   const liq = loan.events.find((e) => e.kind === 'liquidated');
   const seized = liq?.amount ?? zero;
   const refunded = liq?.refunded ?? zero;
+  // Status comes from the contract, not from the presence of a liquidation event: a
+  // chunk of logs that failed to fetch would otherwise silently reclassify a
+  // liquidated loan as open and drop the collateral loss from the statement.
   const liquidated = loan.statusVal === 4;
 
   if (role === 'lender') {
@@ -96,6 +114,8 @@ function header(doc: jsPDF, title: string, meta: StatementMeta, subtitle: string
   return 31 + lines.length * 4 + 4;
 }
 
+// Runs after the tables are laid out, not before: the page count is not known until
+// autoTable has finished paginating, and the footer has to say "page i of n".
 function footer(doc: jsPDF, estimatedUsed: boolean) {
   const pages = doc.getNumberOfPages();
   for (let i = 1; i <= pages; i++) {
@@ -139,15 +159,22 @@ export function generateTradebook(loans: StatementLoan[], meta: StatementMeta): 
         };
       }),
     )
+    // Sorted across all loans, not within each one: a tradebook is a chronological
+    // ledger of what the account did, so two loans running concurrently interleave.
     .sort((a, b) => a.ts - b.ts)
     .map((r) => r.row);
 
   autoTable(doc, {
     startY,
     head: [['Date (UTC)', 'Loan', 'Action', 'ETH', 'USD', 'Refunded ETH', 'Transaction hash']],
+    // A placeholder row rather than an empty table, so an account with no activity
+    // still produces a document that says so instead of a blank page that reads as a
+    // broken export.
     body: rows.length ? rows : [['—', '—', 'No activity yet', '—', '—', '', '']],
     styles: { fontSize: 7, cellPadding: 1.5 },
     headStyles: { fillColor: [15, 23, 42] },
+    // Transaction hashes are fixed width and must not wrap: a hash broken across two
+    // lines cannot be copied out of the PDF, which defeats the point of printing it.
     columnStyles: { 6: { cellWidth: 90 } },
   });
   footer(doc, estimated);
@@ -178,7 +205,14 @@ export function generatePnl(loans: StatementLoan[], meta: StatementMeta): jsPDF 
       p.liquidated ? fmtEth(p.seized) : '—',
       fmtEth(p.inflow),
       fmtEth(p.outflow),
+      // Sign is printed explicitly and the magnitude formatted from the absolute
+      // value, so a negative net reads "-0.05" rather than "--0.05" and, more to the
+      // point, a positive one is marked "+" rather than left ambiguous.
       `${p.net >= zero ? '+' : '-'}${fmtEth(p.net >= zero ? p.net : -p.net)}`,
+      // Net is valued at the current price, unlike the tradebook and tax statements,
+      // which value each event at the price when it happened. A net result is a
+      // position held now, not a transaction that occurred at a moment, so there is no
+      // single historical rate that would be correct for it.
       meta.currentEthUsd
         ? `${p.net >= zero ? '+' : '-'}${fmtUsd(Math.abs(ETH(p.net)) * meta.currentEthUsd)}`
         : '—',
@@ -212,6 +246,8 @@ export function generatePnl(loans: StatementLoan[], meta: StatementMeta): jsPDF 
     headStyles: { fillColor: [15, 23, 42] },
     footStyles: { fillColor: [30, 41, 59], textColor: 255 },
   });
+  // Always false here: this statement never consults per-event snapshots, so the
+  // "(est.)" caveat would be describing a valuation it did not perform.
   footer(doc, false);
   return doc;
 }
@@ -262,6 +298,9 @@ export function generateTaxPnl(loans: StatementLoan[], meta: StatementMeta): jsP
     headStyles: { fillColor: [15, 23, 42] },
   });
 
+  // autoTable attaches lastAutoTable to the document at runtime and does not declare
+  // it on jsPDF's type, so the cast is the only way to learn where the table ended and
+  // place the disclaimer directly beneath it rather than at a guessed offset.
   const finalY = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY;
   doc.setFontSize(7);
   doc.setTextColor(110);

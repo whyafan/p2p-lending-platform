@@ -31,11 +31,14 @@ export function shortAddress(address?: string): string {
 }
 
 export function loanStatusLabel(status?: number): string {
+  // Index order is the LoanStatus enum in Loan.sol and must not be rearranged: the
+  // contract returns the ordinal, and this array is the only thing giving it meaning.
   const LABELS = ['Requested', 'Funded', 'Repaid', 'Cancelled', 'Liquidated'] as const;
   if (status === undefined) return '-';
   return LABELS[status] ?? 'Unknown';
 }
 
+/** Returns null in local mode: a Hardhat transaction exists on no public explorer. */
 export function txExplorerUrl(hash: string | undefined, networkMode: string): string | null {
   if (!hash) return null;
   if (networkMode === 'testnet') return `https://sepolia.etherscan.io/tx/${hash}`;

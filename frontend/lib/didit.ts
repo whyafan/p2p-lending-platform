@@ -18,6 +18,9 @@ export async function getDiditSessionStatus(sessionId: string): Promise<{
   const apiKey = process.env.DIDIT_API_KEY;
   if (!apiKey) return { error: 'Didit not configured', data: null };
 
+  // Both auth headers are sent because the candidate paths below are not documented
+  // consistently and each has been observed wanting a different one. Sending both is
+  // harmless; guessing wrong costs a 401 that looks identical to a wrong path.
   const headers = {
     'Content-Type': 'application/json',
     'X-Api-Key': apiKey,
@@ -38,6 +41,9 @@ export async function getDiditSessionStatus(sessionId: string): Promise<{
         return { error: null, data };
       }
       // 404 = path doesn't exist, try next; any other error = stop
+      // A 401 or a 500 is an answer about this account or this session, and retrying
+      // the remaining paths would just produce the same failure three more times while
+      // replacing the useful error message with "all paths 404".
       if (response.status !== 404) {
         return { error: `${response.status}: ${text}`, data: null };
       }
@@ -93,6 +99,21 @@ export async function createDiditSession(params: {
   return { error: null, session: { session_id: sessionId, url } };
 }
 
+/**
+ * HMAC-verify a webhook before trusting anything in it.
+ *
+ * The webhook is what flips a user to KYC APPROVED, so an unverified body is an open
+ * door to self-approval. Missing secret or missing header returns false rather than
+ * skipping the check: an unconfigured deployment must fail closed.
+ *
+ * Compared with timingSafeEqual rather than ===, so the comparison cannot be used as
+ * an oracle to recover the expected digest byte by byte. The length is checked first
+ * because timingSafeEqual throws on mismatched lengths, and the throw is caught and
+ * treated as a failed match.
+ *
+ * @param rawBody Exact bytes as received. Re-serialising parsed JSON would change the
+ *                body and break every signature.
+ */
 export function verifyDiditWebhookSignature(rawBody: string, signature: string | null): boolean {
   const secret = process.env.DIDIT_WEBHOOK_SECRET;
   if (!secret || !signature) {
@@ -131,7 +152,17 @@ export function verifyDiditWebhookSignature(rawBody: string, signature: string |
   return false;
 }
 
+/**
+ * Collapse Didit's verdict vocabulary onto this app's six KYC statuses.
+ *
+ * Every list is wider than the provider's documented set because the wording has
+ * changed between workflow versions and the value arrives as free text. Unrecognised
+ * values fall through to PENDING, never to APPROVED: an unknown verdict must not be
+ * able to open the gate.
+ */
 export function mapDiditStatus(status: string): string {
+  // Punctuation stripped so "in_review", "in-review" and "In Review" all collapse to
+  // one token and the lists below only have to spell each verdict once.
   const normalized = status.toLowerCase().replace(/[_\s-]/g, '');
   if (['approved', 'verified', 'success', 'completed', 'clear', 'accept', 'accepted'].includes(normalized)) return 'APPROVED';
   if (['declined', 'rejected', 'failed', 'deny', 'denied', 'refuse', 'refused'].includes(normalized)) return 'REJECTED';
