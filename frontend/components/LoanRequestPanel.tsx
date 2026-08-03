@@ -139,6 +139,9 @@ type BackendScoreResult = {
 };
 
 function ScoreGauge({ score, tier }: { score: number; tier: string }) {
+  // Maps the model's [-1, +1] onto a 0-100% bar width. The two tick marks below sit at
+  // 50% and 70%, which are where 0.00 and 0.40 land under this transform, so the tier
+  // boundaries stay visually aligned with TIER_THRESHOLDS.
   const pct = ((score + 1) / 2) * 100;
   const color = score >= 0.4 ? '#10b981' : score >= 0 ? '#f59e0b' : '#ef4444';
   return (
@@ -414,6 +417,9 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     if (!riskExpl || !realWalletEth || ethPrice <= 0) return 5000;
     const tier = RISK_TIER_CONFIG[riskExpl.tier];
     const collateralFactor = tier.maxLtv * (1 - tier.haircut);
+    // 90% of the balance, so gas is still payable after the collateral leaves. A slider
+    // that let the user select a loan they cannot post collateral for would fail in
+    // MetaMask, after they had already committed to the terms.
     return Math.floor(realWalletEth * 0.9 * ethPrice * collateralFactor);
   }, [riskExpl, realWalletEth, ethPrice]);
 
@@ -429,16 +435,27 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   }, [riskExpl, loanAmountUsd, tenorDays, ethPrice]);
 
   // Actual ETH amounts sent on-chain — capped to DEMO_MAX_COLLATERAL_ETH so Sepolia is near-free
+  //
+  // There are deliberately two sets of numbers in this component. termSheet above is
+  // the loan as priced: the USD amount the borrower asked for and the collateral the
+  // tier demands for it. These are what actually move on chain, scaled down so a demo
+  // costs a fraction of a test ETH. The ratio between them is preserved, so the LTV,
+  // interest and liquidation behaviour of the real contract match the quoted terms even
+  // though the magnitudes do not.
   const demoTxAmounts = useMemo(() => {
     if (!riskExpl || !termSheet || ethPrice <= 0) return null;
     const tier = RISK_TIER_CONFIG[riskExpl.tier];
     const collateralFactor = tier.maxLtv * (1 - tier.haircut);
+    // Half the balance, not 90% as above: this wallet also has to fund the lender side
+    // in a two-party demo, and the requests are capped near-free anyway.
     const walletCap = realWalletEth ? realWalletEth * 0.5 : DEMO_MAX_COLLATERAL_ETH;
     const actualCollateral = Math.min(
       termSheet.requiredCollateralEth,
       walletCap,
       DEMO_MAX_COLLATERAL_ETH,
     );
+    // Derived from the collateral rather than scaled from the quoted principal, so the
+    // pair always satisfies the tier's collateral factor exactly.
     const actualPrincipal = actualCollateral * collateralFactor;
     return { actualCollateral, actualPrincipal };
   }, [riskExpl, termSheet, realWalletEth, ethPrice]);
@@ -558,10 +575,15 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
       overallScore: result.overall_score,
       contributions: result.contributions.map((c) => ({
         feature: c.feature,
+        // 'integrity' collapses into 'off-chain': the shared RiskExplanation type has
+        // only two categories, and claim integrity is a property of what was claimed.
         category: c.category === 'on-chain' ? 'on-chain' : 'off-chain',
         value: c.value,
         score: c.score,
         weight: c.weight,
+        // The dead band is not cosmetic. SHAP values are never exactly zero, so without
+        // it every feature would be labelled as pushing the tier one way or the other,
+        // including ones contributing a thousandth of the score.
         description:
           c.shap_value > 0.01
             ? `Positive contribution to tier (SHAP: +${c.shap_value.toFixed(3)})`
@@ -596,6 +618,9 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
         }),
       });
       const data = await res.json() as Record<string, unknown>;
+      // No silent fallback to the browser scorer. The two paths look at different data,
+      // the local one having no access to the borrower's real chain history, so quietly
+      // substituting it would hand out a tier the UI claims came from mainnet analysis.
       if (data.fallback) {
         setScoringWarnings(['Credit scoring backend unavailable. Start the backend server and try again.']);
       } else if (res.ok) {
@@ -642,6 +667,9 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     const collateralWei = parseEther(demoTxAmounts.actualCollateral.toFixed(18));
 
     try {
+      // Forced before the write, not left to wagmi's own chain check: a wallet sitting
+      // on mainnet would otherwise be asked to sign a transaction against a factory
+      // address that means nothing there.
       await switchChainAsync({ chainId });
       const hash = await writeContractAsync({
         address: factoryAddress as `0x${string}`,
@@ -661,6 +689,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
       if (address) storeLoanTx(address, hash);
       onLoanCreated?.(hash, 'pending');
     } catch (err) {
+      // Truncated because wallet errors run to hundreds of lines of RPC payload, and
+      // the useful part, the revert reason or the rejection, is at the front.
       const msg = err instanceof Error ? err.message : 'Transaction failed';
       setTxError(msg.length > 140 ? msg.slice(0, 137) + '…' : msg);
     }

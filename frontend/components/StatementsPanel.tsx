@@ -167,6 +167,10 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
       const lenderAddr =
         idx >= 0 && lenderRes?.[idx]?.status === 'success' ? (lenderRes[idx].result as string) : undefined;
 
+      // Ownership depends on the selected role, so the same wallet produces two
+      // different statements: as borrower it matches the terms' borrower field, as
+      // lender the contract's lender. A user who has been both on different loans gets
+      // each set separately rather than one merged ledger they cannot reconcile.
       const mine =
         role === 'borrower' ? t.borrower.toLowerCase() === me : lenderAddr?.toLowerCase() === me;
       if (!mine) return;
@@ -213,6 +217,9 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
         return true;
       }),
     }));
+    // All-time keeps every loan, including ones with no indexed events, so a borrower
+    // with an open request still sees it listed. Any bounded period drops the silent
+    // ones, since a loan that did nothing in the window has no place in its statement.
     if (range.from === undefined && range.to === undefined) return withEvents;
     return withEvents.filter((l) => l.events.length > 0);
   }, [myLoans, byLoan, range]);

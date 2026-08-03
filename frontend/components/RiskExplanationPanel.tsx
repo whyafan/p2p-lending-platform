@@ -28,6 +28,18 @@ type Props = {
 
 type IconComponent = React.FC<LucideProps>;
 
+/**
+ * Plain-language copy for each feature, keyed by the display name the scorers emit.
+ *
+ * Kept out of risk-explainer.ts on purpose: that file is the model, and the model's own
+ * `description` field is written for someone who already understands LTV and mixers.
+ * This is the second register, for a borrower who does not, and the two are allowed to
+ * evolve separately.
+ *
+ * The keys must match FEATURE_SCORING_GUIDE's feature strings exactly. A rename there
+ * silently drops a card here rather than failing, which is why the lookup below falls
+ * back rather than assuming a hit.
+ */
 const FEATURE_META: Record<string, {
   Icon: IconComponent;
   plainName: string;
@@ -123,6 +135,10 @@ const TIER_SUMMARY: Record<string, { Icon: IconComponent; headline: string; deta
   },
 };
 
+// Per-feature banding, unrelated to the tier thresholds. These read a single feature's
+// raw score, which is unweighted, so a feature can be "Great" on a profile that still
+// lands in tier C. The cutoffs are lower than TIER_THRESHOLDS for that reason: 0.3 on
+// one feature is a good showing, 0.3 as a weighted total is not tier A.
 function statusFor(score: number): { label: string; color: string; dot: string } {
   if (score >= 0.3) return { label: 'Great', color: 'text-emerald-400', dot: 'bg-emerald-500' };
   if (score >= -0.1) return { label: 'OK', color: 'text-amber-400', dot: 'bg-amber-400' };
@@ -144,6 +160,9 @@ function SimpleBar({ score }: { score: number }) {
 function FeatureRow({ c }: { c: FeatureContribution }) {
   const meta = FEATURE_META[c.feature];
   const status = statusFor(c.score);
+  // Renders nothing rather than falling back to the model's own wording. The backend
+  // scorer emits features this panel has no copy for, and a row written in the
+  // technical register would undercut the point of the plain-language view.
   if (!meta) return null;
 
   return (

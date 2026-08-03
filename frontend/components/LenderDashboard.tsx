@@ -126,6 +126,15 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
   // chain MetaMask happens to be connected to.
   const chainId = networkMode === 'testnet' ? sepolia.id : hardhat.id;
 
+  // The reads below are four dependent rounds, not one batch, because each depends on
+  // the answer to the last: the factory knows the ids, the ids yield the terms, the
+  // terms carry the per-loan contract addresses, and only those addresses can be asked
+  // for status and liquidation state. Within a round everything is one multicall.
+  //
+  // This is the read pattern that will not scale past demo volume, since round 4 alone
+  // is eight calls per loan on every poll. An events indexer replaces it eventually;
+  // until then the multicall keeps it to a handful of requests rather than hundreds.
+
   // ── Round 1: read all loan IDs ──
   const { data: loanIds, isLoading: idsLoading, refetch: refetchIds } = useReadContract({
     address: isDeployed ? (factoryAddress as `0x${string}`) : undefined,
@@ -294,6 +303,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
   });
   const { data: priceAtFundingResults, refetch: refetchPriceAtFunding } = useReadContracts({
     contracts: priceAtFundingContracts,
+    // Polled at a minute rather than POLL_MS: the contract writes this once at funding
+    // and never again, so the only change it can ever report is 0 becoming a price.
     query: { enabled: priceAtFundingContracts.length > 0, refetchInterval: 60_000 },
   });
   const outstandingByAddress = useMemo(() => {
@@ -490,6 +501,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress, previewByAddress, outstandingByAddress, priceAtFundingByAddress,
   ]);
 
+  // Only settled loans are handed to the event indexer. An open or funded loan has no
+  // settlement to show a receipt for, and log queries are the most expensive read here,
+  // so the set is narrowed before it reaches useLoanEvents rather than after.
   const settledAddresses = useMemo(
     () =>
       loans
@@ -512,11 +526,17 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     enabled: settledAddresses.length > 0,
   });
 
+  // Expired requests are hidden rather than shown as unfundable. fund() reverts past
+  // the seven-day window, so an expired card is an offer the chain will not honour.
   const openLoans = useMemo(
     () => loans.filter((l) => l.statusVal === 0 && l.terms && !isExpired(l.terms.createdAt)),
     [loans],
   );
 
+  // Matches against every authorised account, not just the active one. A user who funds
+  // from one MetaMask account and then switches to another would otherwise watch their
+  // own positions disappear from the dashboard. Falls back to the active address when
+  // the connector reports no account list.
   const isMine = (lenderAddr: string | undefined) =>
     lenderAddr !== undefined &&
     (allAddresses.length > 0
@@ -544,6 +564,16 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     [loans, allAddresses, address],
   );
 
+  /**
+   * Fund a request by sending the exact principal to its Loan contract.
+   *
+   * principalWei comes from the factory's stored terms rather than being recomputed
+   * here, because fund() requires the value to match to the wei and any client-side
+   * arithmetic on the way would eventually disagree with what was written on chain.
+   *
+   * Errors are tracked against a loan id so a failure shows on the card the user
+   * clicked rather than across the whole marketplace.
+   */
   async function fundLoan(loanContractAddr: `0x${string}`, principalWei: bigint, loanId: bigint) {
     setFundingError(null);
     setFundingErrorLoanId(null);
@@ -567,6 +597,13 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     }
   }
 
+  /**
+   * Call liquidate() on a position the contract has already judged liquidatable.
+   *
+   * The button is gated on isLiquidatable() read from the chain, not on the client-side
+   * countdown, so this never depends on the browser clock agreeing with block time. If
+   * the two disagree the transaction reverts and nothing is lost.
+   */
   async function liquidateLoan(loanContractAddr: `0x${string}`, loanId: bigint) {
     setLiqLoanId(loanId);
     setLiqHash(undefined);

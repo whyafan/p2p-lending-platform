@@ -10,9 +10,10 @@
  * when it goes wrong.
  *
  * Everything here is derived from on-chain loan terms plus the tier→terms rules
- * in lib/loan-terms.ts. The borrower's underlying feature-level risk breakdown
- * is computed in their browser at request time and never persisted, so it can't
- * be shown here yet — see PLAN.md for that follow-up.
+ * in lib/loan-terms.ts, so the panel needs nothing but the loan itself to render.
+ * The borrower's feature-level breakdown is computed in their browser at request
+ * time; where it was persisted to loan_risk_assessments it arrives as the
+ * `assessment` prop, and where it was not, the panel shows the terms alone.
  */
 
 import { useState } from 'react';
@@ -73,6 +74,9 @@ export function LoanSafetyPanel({
       : null;
 
   // What the lender recovers at the moment of liquidation, before gas.
+  // Shown because "you are protected by collateral" is meaningless without the number:
+  // at the threshold the collateral is still worth more than the debt, which is the
+  // actual reason the position is safe to fund.
   const collateralAtThreshold =
     principalUsd !== null && threshold > 0 ? principalUsd / threshold : null;
 

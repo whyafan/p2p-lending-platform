@@ -3,6 +3,9 @@
 import { useQuery } from '@tanstack/react-query';
 import type { MarketPulse } from '../app/api/market-pulse/route';
 
+// Breakpoints are the Fear & Greed index's own published bands (extreme fear, fear,
+// neutral, greed, extreme greed), so the colour agrees with the label the API returns
+// rather than imposing a second, conflicting reading of the same number.
 function fgColor(v: number): string {
   if (v <= 25) return 'text-red-400';
   if (v <= 45) return 'text-orange-400';

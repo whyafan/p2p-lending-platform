@@ -58,11 +58,19 @@ export function LoanSettlementReceipt({
 
   // Borrower: they received the principal, paid back repayments, and either got
   // collateral released (repaid) or partially refunded (liquidated).
+  // A repaid loan returns the whole collateral, a liquidated one returns only the
+  // surplus the contract refunded. Everything the borrower did not get back counts as
+  // part of what the loan cost them, alongside the repayments themselves.
   const collateralBack = liquidated ? refunded : collateral;
   const borrowerCost = totalRepaid + (collateral - collateralBack);
 
+  // Each leg is valued at the price when it happened, not at one price for the receipt.
+  // A loan funded at $2,000 and repaid at $3,000 moved the same ETH but not the same
+  // money, and a receipt that hid that would misstate what the position actually did.
   const usdOf = (wei: bigint, e?: LoanEvent) => {
     const p = e ? priceFor(e) : { usd: 0, estimated: true };
+    // No price at all yields null, which renders as an omitted figure. Showing $0.00
+    // would read as a real valuation of zero.
     if (!p.usd) return null;
     return parseFloat(formatEther(wei)) * p.usd;
   };
