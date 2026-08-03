@@ -19,9 +19,16 @@ interface IPriceFeed {
     function latestPrice() external view returns (uint256);
 }
 
+/// @title Loan — one contract per borrow request, escrow and enforcer for its whole lifecycle
+/// @notice Deployed by LoanFactory once the borrower's collateral is in the vault.
+///         Terms (principal, duration, interest, LTV, buffer) are fixed at construction
+///         and never renegotiated; everything this contract does afterwards is a
+///         consequence of those numbers plus time and the oracle price.
 contract Loan is ReentrancyGuard {
     using Address for address payable;
 
+    // How long a request stays open before it can no longer be funded. Bounds how
+    // long the borrower's collateral can sit locked against a request nobody took.
     uint256 public constant FUNDING_WINDOW = 7 days;
 
     // Grace period after the repayment deadline before a lender may liquidate.
@@ -47,6 +54,8 @@ contract Loan is ReentrancyGuard {
     uint256 public immutable interestBps;
     uint256 public immutable maxLtvBps;
     uint256 public immutable liquidationBufferBps;
+    // Not immutable, unlike the terms above: fastForward() rewinds these to simulate
+    // elapsed time. On a production deployment (demoMode false) they are write-once.
     uint256 public requestedAt;
     uint256 public fundedAt;
 
@@ -119,6 +128,24 @@ contract Loan is ReentrancyGuard {
         _;
     }
 
+    /// @notice Records the agreed terms and opens the request for funding.
+    /// @dev Called only by LoanFactory.createLoan(), after the collateral has been
+    ///      taken from the borrower but before it reaches the vault. The collateral
+    ///      amount is passed in rather than held here — this contract never custodies
+    ///      collateral, it only instructs the vault.
+    /// @param loanId_ Factory-assigned id; also the vault's key for this position.
+    /// @param factory_ Deploying factory, read back later for the demoMode flag.
+    /// @param borrower_ Owner of the collateral and the only address that may repay or cancel.
+    /// @param principalAmount_ Exact wei a lender must send to fund().
+    /// @param collateralAmount_ Wei of collateral held in the vault against this loan.
+    /// @param durationDays_ Agreed term, used to derive the repayment deadline.
+    /// @param interestBps_ Annualised rate in bps; accrual is continuous, not per-term.
+    /// @param maxLtvBps_ Tier's maximum LTV, the base of the liquidation threshold.
+    /// @param liquidationBufferBps_ Headroom added to maxLtv before liquidation opens.
+    /// @param collateralVault_ Vault holding the collateral for this loanId.
+    /// @param priceFeed_ Oracle, or address(0) to run deadline-only.
+    /// Reverts on a zero factory, borrower or vault, zero principal, collateral or
+    /// duration, or an LTV outside (0, 10000].
     constructor(
         uint256 loanId_,
         address factory_,
@@ -155,6 +182,11 @@ contract Loan is ReentrancyGuard {
         status = LoanStatus.Requested;
     }
 
+    /// @notice Fund the request in full and send the principal straight to the borrower.
+    /// @dev Single lender, exact amount, no partial fills — the debt figures below all
+    ///      assume the whole principal moved in one transaction. Reverts unless the
+    ///      loan is still Requested, the funding window is open, the caller is not the
+    ///      borrower, and msg.value equals principalAmount exactly.
     function fund() external payable nonReentrant {
         require(status == LoanStatus.Requested, "Loan: not fundable");
         require(block.timestamp <= requestedAt + FUNDING_WINDOW, "Loan: funding window has expired");
@@ -178,15 +210,21 @@ contract Loan is ReentrancyGuard {
         emit LoanFunded(loanId, msg.sender, msg.value);
     }
 
-    // Partial payments are supported: any call may pay less than the full
-    // outstanding balance. Each payment is forwarded to the lender immediately
-    // (no escrow), matching this contract's existing instant-settlement pattern.
-    // The loan only transitions to Repaid — releasing collateral — once
-    // amountRepaid reaches the live outstandingBalance().
+    /// @notice Pay any amount toward the outstanding balance; overpayment is refunded.
+    /// @dev Partial payments are supported: any call may pay less than the full
+    ///      outstanding balance. Each payment is forwarded to the lender immediately
+    ///      (no escrow), matching this contract's existing instant-settlement pattern.
+    ///      The loan only transitions to Repaid — releasing collateral — once
+    ///      amountRepaid reaches the live outstandingBalance().
+    ///      Reverts unless the caller is the borrower, the loan is Funded, msg.value
+    ///      is non-zero and something is still owed.
     function repay() external payable onlyBorrower nonReentrant {
         require(status == LoanStatus.Funded, "Loan: not active");
         require(msg.value > 0, "Loan: repayment must be non-zero");
 
+        // Read once and reuse. outstandingBalance() moves with block.timestamp, so
+        // recomputing it per use could let the refund, the applied amount and the
+        // final-payment test disagree with each other within a single call.
         uint256 owed = outstandingBalance();
         require(owed > 0, "Loan: nothing owed");
 
@@ -194,6 +232,8 @@ contract Loan is ReentrancyGuard {
         uint256 refund = msg.value - applied;
         bool isFinalPayment = (applied == owed);
 
+        // All state settled before any value leaves the contract, so the vault call
+        // and the two transfers below cannot re-enter into a stale balance.
         amountRepaid += applied;
 
         if (isFinalPayment) {
@@ -214,6 +254,10 @@ contract Loan is ReentrancyGuard {
         }
     }
 
+    /// @notice Withdraw an unfunded request and take the collateral back.
+    /// @dev Only valid while Requested; once a lender has funded there is a
+    ///      counterparty with a claim, so the exit is repay() or liquidation.
+    ///      Reverts unless the caller is the borrower and the loan is still Requested.
     function cancel() external onlyBorrower nonReentrant {
         require(status == LoanStatus.Requested, "Loan: cannot cancel");
 
@@ -230,6 +274,9 @@ contract Loan is ReentrancyGuard {
     ///      loan is Requested, and the repayment deadline / grace period / interest
     ///      accrual once it is Funded. Restricted to the loan's own participants so
     ///      a stranger cannot force someone else's position into liquidation.
+    /// @param secondsToSkip How far to advance the loan's apparent age.
+    /// Reverts when the factory has demoMode off, secondsToSkip is 0, the caller is
+    /// neither borrower nor lender, or the loan is already closed.
     function fastForward(uint256 secondsToSkip) external {
         require(demoMode(), "Loan: demo mode disabled");
         require(secondsToSkip > 0, "Loan: nothing to skip");
@@ -238,6 +285,8 @@ contract Loan is ReentrancyGuard {
             "Loan: not a participant"
         );
 
+        // Floored at 0 rather than allowed to underflow, so an oversized skip just
+        // pins the loan at maximum age instead of reverting the demo.
         if (status == LoanStatus.Requested) {
             requestedAt = secondsToSkip >= requestedAt ? 0 : requestedAt - secondsToSkip;
         } else if (status == LoanStatus.Funded) {
@@ -249,11 +298,16 @@ contract Loan is ReentrancyGuard {
         emit DemoTimeSkipped(loanId, msg.sender, secondsToSkip);
     }
 
-    // Real liquidation eligibility. Two independent triggers:
-    //   1. Delinquency — past the repayment deadline plus the grace period.
-    //   2. Collateral shortfall — oracle-priced LTV at or above the liquidation
-    //      threshold (maxLtv + buffer), i.e. an ETH price crash.
-    // Replaces the old unconditional markLiquidatedForDemo() bypass.
+    /// @notice Seize collateral to cover the outstanding debt and refund the surplus.
+    /// @dev Real liquidation eligibility. Two independent triggers:
+    ///        1. Delinquency — past the repayment deadline plus the grace period.
+    ///        2. Collateral shortfall — oracle-priced LTV at or above the liquidation
+    ///           threshold (maxLtv + buffer), i.e. an ETH price crash.
+    ///      Replaces the old unconditional markLiquidatedForDemo() bypass.
+    ///      Only the lender may call: there is no keeper reward, so opening this up
+    ///      would let a third party close a position they have no stake in.
+    ///      Reverts unless the caller is the lender, the loan is Funded and at least
+    ///      one trigger is live.
     function liquidate() external onlyLender nonReentrant {
         require(status == LoanStatus.Funded, "Loan: not active");
         require(
@@ -276,8 +330,11 @@ contract Loan is ReentrancyGuard {
         emit LoanLiquidated(loanId, msg.sender, seizeAmount, refund);
     }
 
-    /// What a lender would seize right now, and what the borrower would keep.
-    /// Lets both sides see the split before anyone clicks Liquidate.
+    /// @notice What a lender would seize right now, and what the borrower would keep.
+    /// @dev Lets both sides see the split before anyone clicks Liquidate. Mirrors the
+    ///      arithmetic in liquidate() exactly; if the two ever diverge the UI is lying.
+    /// @return seizeAmount Wei that would go to the lender.
+    /// @return refundAmount Wei that would go back to the borrower.
     function liquidationPreview() external view returns (uint256 seizeAmount, uint256 refundAmount) {
         uint256 owed = outstandingBalance();
         seizeAmount = owed < collateralAmount ? owed : collateralAmount;
@@ -295,7 +352,10 @@ contract Loan is ReentrancyGuard {
         }
     }
 
-    /// Whether demo helpers (fastForward) are enabled, per the deploying factory.
+    /// @notice Whether demo helpers (fastForward) are enabled, per the deploying factory.
+    /// @dev Wrapped in try/catch for the same reason as _readPrice: a factory that
+    ///      does not answer means demo off, not a revert propagated into fastForward().
+    /// @return True when the factory reports demoMode.
     function demoMode() public view returns (bool) {
         try ILoanFactory(factory).demoMode() returns (bool d) {
             return d;
@@ -304,36 +364,44 @@ contract Loan is ReentrancyGuard {
         }
     }
 
-    /// Current ETH/USD price from the oracle. 0 when unavailable.
+    /// @notice Current ETH/USD price from the oracle.
+    /// @return Whole dollars, or 0 when unavailable.
     function currentPrice() public view returns (uint256) {
         return _readPrice();
     }
 
-    /// LTV where liquidation becomes available, in bps (maxLtv + buffer).
+    /// @notice LTV where liquidation becomes available, in bps (maxLtv + buffer).
+    /// @return The threshold in basis points.
     function liquidationThresholdBps() public view returns (uint256) {
         return maxLtvBps + liquidationBufferBps;
     }
 
-    /// Live LTV in bps: frozen USD debt over current USD collateral value.
-    /// Returns 0 when it cannot be computed (not funded, or no oracle data) —
-    /// callers must treat 0 as "unknown", not as "perfectly healthy".
+    /// @notice Live LTV in bps: frozen USD debt over current USD collateral value.
+    /// @dev Returns 0 when it cannot be computed (not funded, or no oracle data) —
+    ///      callers must treat 0 as "unknown", not as "perfectly healthy".
+    /// @return LTV in basis points, or 0 if it cannot be computed.
     function currentLtvBps() public view returns (uint256) {
         if (status != LoanStatus.Funded || debtValueUsd == 0) return 0;
         uint256 price = _readPrice();
         if (price == 0) return 0;
         uint256 collateralValueUsd = collateralAmount * price;
         if (collateralValueUsd == 0) return 0;
+        // mulDiv, not (debtValueUsd * 10_000) / collateralValueUsd: both operands are
+        // already wei x USD, and the intermediate product would be the thing that
+        // overflows. mulDiv carries it at 512 bits and only then divides down.
         return Math.mulDiv(debtValueUsd, 10_000, collateralValueUsd);
     }
 
-    /// True once the collateral no longer covers the debt at the threshold.
+    /// @notice True once the collateral no longer covers the debt at the threshold.
+    /// @return Whether the price trigger is live.
     function isPriceLiquidatable() public view returns (bool) {
         uint256 ltv = currentLtvBps();
         if (ltv == 0) return false; // unknown price => never liquidate on price
         return ltv >= liquidationThresholdBps();
     }
 
-    /// True once the borrower has missed the deadline and burned the grace period.
+    /// @notice True once the borrower has missed the deadline and burned the grace period.
+    /// @return Whether the delinquency trigger is live.
     function isDelinquentLiquidatable() public view returns (bool) {
         return status == LoanStatus.Funded && block.timestamp > repaymentDueAt() + GRACE_PERIOD;
     }
@@ -349,41 +417,53 @@ contract Loan is ReentrancyGuard {
         return end < cap ? end : cap;
     }
 
-    // Interest accrues continuously from fundedAt at interestBps, not just over
-    // the fixed durationDays term — a loan repaid early pays less, one repaid
-    // late pays more (up to the cap above). At elapsedSeconds == durationDays
-    // exactly, this is algebraically identical to a fixed-duration calculation.
+    /// @notice Interest owed as of now (or as of settlement, once closed).
+    /// @dev Interest accrues continuously from fundedAt at interestBps, not just over
+    ///      the fixed durationDays term — a loan repaid early pays less, one repaid
+    ///      late pays more (up to the cap above). At elapsedSeconds == durationDays
+    ///      exactly, this is algebraically identical to a fixed-duration calculation.
+    /// @return Interest in wei; 0 before funding.
     function interestDue() public view returns (uint256) {
         if (fundedAt == 0) return 0;
         uint256 elapsedSeconds = _interestAccrualEnd() - fundedAt;
         return Math.mulDiv(principalAmount, interestBps * elapsedSeconds, 10_000 * 365 days);
     }
 
-    // Live, time-varying figure — the full amount owed as of "now" (or as of
-    // closedAt for a settled loan). Do not cache; re-query at point of use.
+    /// @notice Principal plus accrued interest, ignoring anything already paid.
+    /// @dev Live, time-varying figure — the full amount owed as of "now" (or as of
+    ///      closedAt for a settled loan). Do not cache; re-query at point of use.
+    /// @return Total due in wei.
     function totalRepaymentDue() public view returns (uint256) {
         return principalAmount + interestDue();
     }
 
-    // What's left to pay right now, after amountRepaid is applied.
+    /// @notice What's left to pay right now, after amountRepaid is applied.
+    /// @dev Clamped at 0: a final payment lands exactly on the balance, but the
+    ///      subtraction is guarded anyway so no view can revert on an underflow.
+    /// @return Remaining debt in wei, 0 once settled.
     function outstandingBalance() public view returns (uint256) {
         uint256 due = totalRepaymentDue();
         return due > amountRepaid ? due - amountRepaid : 0;
     }
 
-    // Fixed repayment deadline, derived from the agreed durationDays. Only
-    // meaningful once funded (status == Funded implies fundedAt != 0).
+    /// @notice Timestamp the borrower must have repaid by.
+    /// @dev Fixed repayment deadline, derived from the agreed durationDays. Only
+    ///      meaningful once funded (status == Funded implies fundedAt != 0).
+    /// @return Unix timestamp of the deadline.
     function repaymentDueAt() public view returns (uint256) {
         return fundedAt + (durationDays * 1 days);
     }
 
-    // Past the deadline but not yet liquidatable — informational for the UI.
+    /// @notice Past the deadline but not yet liquidatable — informational for the UI.
+    /// @return Whether the loan is late but still inside the grace period.
     function isDelinquent() public view returns (bool) {
         return status == LoanStatus.Funded && block.timestamp > repaymentDueAt();
     }
 
-    // The exact condition liquidate() enforces — safe for the frontend to poll.
-    // Use isDelinquentLiquidatable() / isPriceLiquidatable() to tell the user *why*.
+    /// @notice Whether liquidate() would succeed right now.
+    /// @dev The exact condition liquidate() enforces — safe for the frontend to poll.
+    ///      Use isDelinquentLiquidatable() / isPriceLiquidatable() to tell the user *why*.
+    /// @return Whether either trigger is live.
     function isLiquidatable() public view returns (bool) {
         return isDelinquentLiquidatable() || isPriceLiquidatable();
     }

@@ -5,6 +5,12 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
+/// @title CollateralVault — sole custodian of borrower collateral
+/// @notice Every position is keyed by loan id and can leave exactly once, either
+///         released to the borrower or split between lender and borrower on
+///         liquidation. Keeping custody here rather than in each Loan means the
+///         funds live behind one audited access-control surface instead of one per
+///         request, and a bug in a single Loan cannot drain another's collateral.
 contract CollateralVault is Ownable, ReentrancyGuard {
     using Address for address payable;
 
@@ -34,6 +40,9 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         _;
     }
 
+    // Authorises against the loan contract recorded when the position was locked, not
+    // against a list the owner maintains. A Loan can therefore only ever move its own
+    // collateral, and no privileged role can move anyone's.
     modifier onlyLoan(uint256 loanId) {
         require(msg.sender == positions[loanId].loanContract, "CollateralVault: caller is not loan");
         _;
@@ -41,6 +50,12 @@ contract CollateralVault is Ownable, ReentrancyGuard {
 
     constructor() Ownable(msg.sender) {}
 
+    /// @notice Point the vault at the factory allowed to lock collateral into it.
+    /// @dev Separate from the constructor because the two contracts reference each
+    ///      other: the factory needs the vault address at deploy time, so the vault
+    ///      has to exist first and learn the factory afterwards.
+    /// @param newFactory Factory address to trust.
+    /// Reverts if not called by the owner, or if newFactory is the zero address.
     function setFactory(address newFactory) external onlyOwner {
         require(newFactory != address(0), "CollateralVault: factory is zero address");
 
@@ -48,6 +63,12 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         emit FactoryUpdated(newFactory);
     }
 
+    /// @notice Take custody of the attached ETH as the collateral for `loanId`.
+    /// @param loanId Factory-assigned id, the key for this position.
+    /// @param borrower Address the surplus or release goes back to.
+    /// @param loanContract The only address subsequently allowed to move this position.
+    /// Reverts unless called by the factory with non-zero value, non-zero borrower and
+    /// loan addresses, and a loanId that has no position yet.
     function lockCollateral(
         uint256 loanId,
         address borrower,
