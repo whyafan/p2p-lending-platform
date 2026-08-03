@@ -2,8 +2,8 @@
 
 import { useState, useMemo, useEffect } from 'react';
 import { useWriteContract, useWaitForTransactionReceipt, useAccount, useBalance, useSwitchChain, useReadContract } from 'wagmi';
-import { decodeEventLog } from 'viem';
 import { parseEther } from 'viem';
+import { decodeLoanCreatedFromReceipt } from '../lib/decode-loan-created.ts';
 import { sepolia, hardhat } from 'wagmi/chains';
 import { BORROWER_PERSONAS, type BorrowerPersona } from '../lib/borrower-personas';
 import { scoreFeatureVector, type RiskExplanation, type FeatureVector } from '../lib/risk-explainer';
@@ -405,6 +405,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   const [isScoring, setIsScoring] = useState(false);
   const [backendResult, setBackendResult] = useState<BackendScoreResult | null>(null);
   const [scoringWarnings, setScoringWarnings] = useState<string[]>([]);
+  const [backendUnavailable, setBackendUnavailable] = useState(false);
 
   // Real wallet ETH balance (Sepolia)
   const realWalletEth = walletBalance ? parseFloat(walletBalance.formatted) : null;
@@ -467,21 +468,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   useEffect(() => {
     if (!isConfirmed || !txReceipt || createdLoanContract) return;
 
-    for (const log of txReceipt.logs) {
-      try {
-        const decoded = decodeEventLog({
-          abi: LOAN_FACTORY_ABI,
-          data: log.data,
-          topics: log.topics,
-        });
-        if (decoded.eventName === 'LoanCreated') {
-          setCreatedLoanContract((decoded.args as { loanContract: `0x${string}` }).loanContract);
-          return;
-        }
-      } catch {
-        // Not a LoanCreated log (the vault emits its own) — keep looking.
-      }
-    }
+    const decoded = decodeLoanCreatedFromReceipt(txReceipt.logs);
+    if (decoded) setCreatedLoanContract(decoded.loanContract);
   }, [isConfirmed, txReceipt, createdLoanContract]);
 
   // Persist the risk explanation once we know which loan it belongs to.
@@ -576,6 +564,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     if (!address) return;
     setIsScoring(true);
     setScoringWarnings([]);
+    setBackendUnavailable(false);
     try {
       const res = await fetch('/api/credit/score', {
         method: 'POST',
@@ -597,7 +586,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
       });
       const data = await res.json() as Record<string, unknown>;
       if (data.fallback) {
-        setScoringWarnings(['Credit scoring backend unavailable. Start the backend server and try again.']);
+        setBackendUnavailable(true);
+        setScoringWarnings(['Real-wallet scoring is temporarily unavailable — the credit-scoring service isn\'t reachable right now.']);
       } else if (res.ok) {
         const result = data as unknown as BackendScoreResult;
         setBackendResult(result);
@@ -623,6 +613,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     setEvalMode(nextMode);
     setSelectedPersona(null);
     setRiskExpl(null);
+    setScoringWarnings([]);
+    setBackendUnavailable(false);
     onTierChange?.(null, null);
     onPersonaChange?.(null);
     setWizardStep(nextMode === 'wallet' && !address ? 0 : 1);
@@ -889,10 +881,19 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
             />
 
             {scoringWarnings.length > 0 && (
-              <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 space-y-1">
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 space-y-2">
                 {scoringWarnings.map((w, i) => (
                   <p key={i} className="text-[11px] text-amber-400">{w}</p>
                 ))}
+                {backendUnavailable && (
+                  <button
+                    type="button"
+                    onClick={switchMode}
+                    className="text-[11px] font-bold text-purple-400 hover:text-purple-300 transition-colors underline underline-offset-2"
+                  >
+                    Use demo mode instead →
+                  </button>
+                )}
               </div>
             )}
 
@@ -906,6 +907,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                   <span className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
                   Analyzing Ethereum Mainnet + Sepolia…
                 </>
+              ) : backendUnavailable ? (
+                'Retry Scoring'
               ) : (
                 'Score My Wallet →'
               )}
@@ -960,7 +963,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                   What went into your score: {evalMode === 'persona' ? 'demo data' : 'your wallet'}
                 </p>
               </div>
-              <div className="bg-white">
+              <div>
                 <RiskExplanationPanel
                   explanation={riskExpl}
                   personaName={evalMode === 'persona' ? (selectedPersona?.displayName ?? 'Profile') : 'My Wallet'}

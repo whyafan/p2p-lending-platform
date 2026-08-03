@@ -1241,6 +1241,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                           <>You seized {collateralEth.toFixed(4)} ETH of collateral.</>
                         )}
                       </span>
+                      <span className="text-[10px] text-slate-700">
+                        Liq. buffer: {formatPercent(Number(terms.liquidationBufferBps) / 10_000)}
+                      </span>
                       <a
                         href={`https://sepolia.etherscan.io/address/${terms.loanContract}`}
                         target="_blank"

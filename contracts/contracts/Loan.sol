@@ -353,6 +353,17 @@ contract Loan is ReentrancyGuard {
     // the fixed durationDays term — a loan repaid early pays less, one repaid
     // late pays more (up to the cap above). At elapsedSeconds == durationDays
     // exactly, this is algebraically identical to a fixed-duration calculation.
+    //
+    // BUG-03: this is wei-integer accounting with a single division at the end
+    // (mulDiv, not compounded per-second), which is already the maximum
+    // precision available without a fixed-point interest unit. For a small
+    // enough principal * interestBps * elapsedSeconds product (demo-scale
+    // loans checked moments after funding are the practical case — real
+    // collateral and multi-day durations don't get near this floor), the true
+    // interest owed is under 1 wei and floor-divides to exactly 0. This is an
+    // accepted MVP limitation, not a bug to chase further: fixing it for real
+    // would mean tracking interest in a higher-precision internal unit (e.g.
+    // 1e18-scaled) and only rounding to wei at withdrawal time.
     function interestDue() public view returns (uint256) {
         if (fundedAt == 0) return 0;
         uint256 elapsedSeconds = _interestAccrualEnd() - fundedAt;

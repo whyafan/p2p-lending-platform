@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAccount, useBalance } from 'wagmi';
@@ -218,7 +218,19 @@ export default function AppPage() {
 
   const ethPrice = priceData?.prices?.['ETH'] ?? priceData?.prices?.['ethereum'] ?? 0;
   const ethChange24h = (priceData?.marketData as Record<string, { usd: number; change24h: number }> | undefined)
-    ?.['ethereum']?.change24h ?? null;
+    ?.['ETH']?.change24h ?? null;
+
+  const [ethPriceTicked, setEthPriceTicked] = useState(false);
+  const prevEthPriceRef = useRef<number>(0);
+  useEffect(() => {
+    if (ethPrice > 0 && prevEthPriceRef.current > 0 && prevEthPriceRef.current !== ethPrice) {
+      setEthPriceTicked(true);
+      const t = setTimeout(() => setEthPriceTicked(false), 900);
+      prevEthPriceRef.current = ethPrice;
+      return () => clearTimeout(t);
+    }
+    prevEthPriceRef.current = ethPrice;
+  }, [ethPrice]);
 
   const userRole = compliance.data?.userRole ?? 'borrower';
   const canLend = compliance.data?.canLend ?? false;
@@ -396,9 +408,20 @@ export default function AppPage() {
 
           {/* ETH Price quick-view */}
           {ethPrice > 0 && (
-            <div className="ml-auto flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-1.5">
-              <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">ETH</span>
-              <span className="text-sm font-mono font-bold text-white">{formatUsd(ethPrice)}</span>
+            <div
+              className="ml-auto flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-1.5"
+              title="Current market ETH/USD price, updates automatically every 30s"
+            >
+              <span className="relative flex h-1.5 w-1.5 flex-shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              </span>
+              <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Current ETH/USD</span>
+              <span
+                className={`text-sm font-mono font-bold transition-colors duration-300 ${ethPriceTicked ? 'text-yellow-300' : 'text-white'}`}
+              >
+                {formatUsd(ethPrice)}
+              </span>
               {ethChange24h !== null && (
                 <span className={`text-[11px] font-bold font-mono ${ethChange24h >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                   {ethChange24h >= 0 ? '+' : ''}{ethChange24h.toFixed(2)}%
