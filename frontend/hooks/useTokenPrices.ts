@@ -18,8 +18,12 @@ export function useTokenPrices() {
       if (!res.ok) throw new Error('Failed to load prices');
       return res.json();
     },
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    // The dashboard header presents this as the live market price, so poll
+    // often enough for that to be true. /api/prices is cached upstream, so this
+    // costs nothing extra beyond its revalidate window.
+    staleTime: 10_000,
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: true,
   });
 }
 

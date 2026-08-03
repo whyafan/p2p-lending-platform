@@ -17,6 +17,7 @@ import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
 import { LoanSettlementReceipt } from './LoanSettlementReceipt';
 import { useLoanEvents } from '../hooks/useLoanEvents';
 import { Hexagon, Check, AlertTriangle } from 'lucide-react';
+import { useHydrated } from '../hooks/useHydrated';
 
 export const MAX_OPEN_REQUESTS = 3;
 // Both sides of a loan watch each other act, so poll briskly rather than
@@ -107,7 +108,12 @@ type Props = {
 };
 
 export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, ethPrice, onPendingCountChange }: Props) {
-  const { address } = useAccount();
+  // wagmi restores the connection asynchronously after hydration. Checking only
+  // `!address` meant that window rendered "Connect a wallet" to people who were
+  // already connected — distinguish "still restoring" from "genuinely absent".
+  const { address, isConnecting, isReconnecting } = useAccount();
+  const hydrated = useHydrated();
+  const walletSettling = !hydrated || isConnecting || isReconnecting;
   const { switchChainAsync } = useSwitchChain();
   const { writeContractAsync, isPending: isRepayPending } = useWriteContract();
 
@@ -368,11 +374,17 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         .map((l) => l.terms.loanContract),
     [myLoans],
   );
+  const earliestCreatedAt = useMemo(() => {
+    const times = myLoans.map((l) => Number(l.terms.createdAt));
+    return times.length > 0 ? Math.min(...times) : undefined;
+  }, [myLoans]);
+
   const { byLoan: eventsByLoan, priceFor } = useLoanEvents({
     factoryAddress,
     loanContracts: settledAddresses,
     chainId,
     ethPrice,
+    fromTimestamp: earliestCreatedAt,
     enabled: settledAddresses.length > 0,
   });
 
@@ -464,9 +476,16 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
             <div key={i} className="h-24 rounded-xl border border-slate-800 animate-pulse" />
           ))}
         </div>
+      ) : walletSettling ? (
+        <div className="py-8 text-center">
+          <p className="text-sm text-slate-600">Restoring your wallet connection…</p>
+        </div>
       ) : !address ? (
         <div className="py-8 text-center">
           <p className="text-sm text-slate-600">Connect a wallet to see your loans.</p>
+          <p className="text-xs text-slate-700 mt-1">
+            If your wallet is already connected, reload the page — the session is still being restored.
+          </p>
         </div>
       ) : myLoans.length === 0 ? (
         <div className="py-8 text-center">

@@ -154,7 +154,7 @@ function FeatureRow({ c }: { c: FeatureContribution }) {
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2 mb-0.5">
-            <p className="text-sm font-bold text-slate-200 leading-snug">{meta.plainName}</p>
+            <p className="text-sm font-bold text-white leading-snug">{meta.plainName}</p>
             <div className="flex items-center gap-1.5 flex-shrink-0">
               <span className={`h-2 w-2 rounded-full flex-shrink-0 ${status.dot}`} />
               <span className={`text-xs font-bold ${status.color}`}>{status.label}</span>
@@ -180,7 +180,7 @@ export function RiskExplanationPanel({ explanation, personaName }: Props) {
   const offChain = contributions.filter((c) => c.category === 'off-chain');
 
   return (
-    <div className="bg-slate-950/40 p-5 space-y-4">
+    <div className="bg-[#111827] p-5 space-y-4">
 
       {/* Overall grade */}
       <div className={`rounded-xl border ${tierInfo.border} ${tierInfo.bg} p-4`}>
@@ -191,7 +191,7 @@ export function RiskExplanationPanel({ explanation, personaName }: Props) {
               <span className="text-lg font-black text-white">Grade: {tier}</span>
               <span className={`text-sm font-bold ${tierInfo.color}`}>{tierInfo.headline}</span>
             </div>
-            <p className="text-xs text-slate-400 leading-relaxed">{tierInfo.detail}</p>
+            <p className="text-xs text-slate-500 leading-relaxed">{tierInfo.detail}</p>
           </div>
         </div>
         <p className="text-[10px] text-slate-500 mt-2 font-medium uppercase tracking-wider">
@@ -244,16 +244,16 @@ export function RiskExplanationPanel({ explanation, personaName }: Props) {
         <button
           type="button"
           onClick={() => setShowTechDetails((v) => !v)}
-          className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 hover:text-slate-300 transition-colors"
+          className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 hover:text-slate-500 transition-colors"
         >
           <span>{showTechDetails ? '▼' : '▶'}</span>
           Show technical score details
         </button>
 
         {showTechDetails && (
-          <div className="mt-3 rounded-lg bg-slate-900/40 border border-slate-800 p-3 space-y-2">
+          <div className="mt-3 rounded-lg bg-slate-900/50 p-3 space-y-2">
             <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Score formula</p>
-            <p className="text-[11px] font-mono text-slate-400 break-all">
+            <p className="text-[11px] font-mono text-slate-500 break-all">
               {contributions.map((c) => `(${(c.weight * 100).toFixed(0)}%×${(c.score >= 0 ? '+' : '')}${c.score.toFixed(2)})`).join(' + ')}
             </p>
             <p className="text-[11px] font-mono font-bold text-white">

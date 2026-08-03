@@ -497,11 +497,18 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
         .map((l) => l.terms!.loanContract),
     [loans],
   );
+  // Earliest loan creation — where the event scan should start.
+  const earliestCreatedAt = useMemo(() => {
+    const times = loans.filter((l) => l.terms).map((l) => Number(l.terms!.createdAt));
+    return times.length > 0 ? Math.min(...times) : undefined;
+  }, [loans]);
+
   const { byLoan: eventsByLoan, priceFor } = useLoanEvents({
     factoryAddress,
     loanContracts: settledAddresses,
     chainId,
     ethPrice,
+    fromTimestamp: earliestCreatedAt,
     enabled: settledAddresses.length > 0,
   });
 

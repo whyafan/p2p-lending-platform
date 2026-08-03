@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAccount, useBalance } from 'wagmi';
@@ -13,6 +13,7 @@ import { BorrowerLoansSection } from '../../components/BorrowerLoansSection';
 import type { BorrowerPersona } from '../../lib/borrower-personas';
 import { useCompliance } from '../../hooks/useCompliance';
 import { useTokenPrices } from '../../hooks/useTokenPrices';
+import { EthPriceTicker } from '../../components/EthPriceTicker';
 import { createClient } from '../../lib/supabase/client';
 import { RISK_TIER_CONFIG, BASE_APR } from '../../lib/loan-terms';
 import { formatUsd, formatPercent } from '../../lib/format';
@@ -217,20 +218,11 @@ export default function AppPage() {
   const { data: priceData } = useTokenPrices();
 
   const ethPrice = priceData?.prices?.['ETH'] ?? priceData?.prices?.['ethereum'] ?? 0;
+  // Keyed by symbol ('ETH'), not by coingecko id: /api/prices builds marketData
+  // from TICKER_COINS' symbol keys, so 'ethereum' here silently never matched
+  // and the 24h change never rendered.
   const ethChange24h = (priceData?.marketData as Record<string, { usd: number; change24h: number }> | undefined)
     ?.['ETH']?.change24h ?? null;
-
-  const [ethPriceTicked, setEthPriceTicked] = useState(false);
-  const prevEthPriceRef = useRef<number>(0);
-  useEffect(() => {
-    if (ethPrice > 0 && prevEthPriceRef.current > 0 && prevEthPriceRef.current !== ethPrice) {
-      setEthPriceTicked(true);
-      const t = setTimeout(() => setEthPriceTicked(false), 900);
-      prevEthPriceRef.current = ethPrice;
-      return () => clearTimeout(t);
-    }
-    prevEthPriceRef.current = ethPrice;
-  }, [ethPrice]);
 
   const userRole = compliance.data?.userRole ?? 'borrower';
   const canLend = compliance.data?.canLend ?? false;
@@ -255,6 +247,29 @@ export default function AppPage() {
   useEffect(() => {
     if (userRole === 'lender') setActiveView('lender');
   }, [userRole]);
+
+  // Seed tier/score from the last assessment we persisted for this user. They
+  // are otherwise transient state set only when the request panel scores a new
+  // loan, so a plain page load always showed "N/A" even for a scored borrower.
+  useEffect(() => {
+    if (!compliance.data?.authenticated) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/loans/risk?latest=1');
+        if (!res.ok) return;
+        const { latest } = await res.json();
+        if (cancelled || !latest) return;
+        setBorrowerTier((prev) => prev ?? latest.tier);
+        setBorrowerScore((prev) => (prev === null ? latest.overallScore : prev));
+      } catch {
+        /* the panel can still score live; this is only a convenience */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [compliance.data?.authenticated]);
 
   const handleTierChange = useCallback((tier: 'A' | 'B' | 'C' | null, score: number | null) => {
     setBorrowerTier(tier);
@@ -406,29 +421,8 @@ export default function AppPage() {
             Change role
           </Link>
 
-          {/* ETH Price quick-view */}
-          {ethPrice > 0 && (
-            <div
-              className="ml-auto flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-1.5"
-              title="Current market ETH/USD price, updates automatically every 30s"
-            >
-              <span className="relative flex h-1.5 w-1.5 flex-shrink-0">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              </span>
-              <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Current ETH/USD</span>
-              <span
-                className={`text-sm font-mono font-bold transition-colors duration-300 ${ethPriceTicked ? 'text-yellow-300' : 'text-white'}`}
-              >
-                {formatUsd(ethPrice)}
-              </span>
-              {ethChange24h !== null && (
-                <span className={`text-[11px] font-bold font-mono ${ethChange24h >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {ethChange24h >= 0 ? '+' : ''}{ethChange24h.toFixed(2)}%
-                </span>
-              )}
-            </div>
-          )}
+          {/* Live market price — labelled and ticking, not a stale snapshot */}
+          <EthPriceTicker price={ethPrice} change24h={ethChange24h} updatedAt={priceData?.updatedAt} />
         </div>
 
         {/* ── Borrower View ── */}

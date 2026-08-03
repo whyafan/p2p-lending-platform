@@ -34,6 +34,8 @@ export type StatementMeta = {
   /** Values an event; `estimated` when no snapshot existed for it. */
   priceFor: (e: LoanEvent) => { usd: number; estimated: boolean };
   currentEthUsd: number;
+  /** Reporting period the caller filtered to, printed on every statement. */
+  periodLabel?: string;
 };
 
 const ETH = (w: bigint) => parseFloat(formatEther(w));
@@ -84,6 +86,7 @@ function header(doc: jsPDF, title: string, meta: StatementMeta, subtitle: string
     `Role: ${meta.role}`,
     meta.email ? `Account: ${meta.email}` : null,
     meta.walletAddress ? `Wallet: ${meta.walletAddress}` : null,
+    meta.periodLabel ? `Period: ${meta.periodLabel}` : null,
     `Generated: ${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC`,
     'Network: Sepolia testnet — figures are in test ETH and carry no real value.',
     subtitle,

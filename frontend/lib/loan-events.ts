@@ -12,7 +12,8 @@
  */
 
 import type { PublicClient } from 'viem';
-import { decodeEventLog, parseAbiItem } from 'viem';
+import { createPublicClient, decodeEventLog, http, parseAbiItem } from 'viem';
+import { sepolia } from 'viem/chains';
 
 export type LoanEventKind =
   | 'funded'
@@ -51,50 +52,63 @@ const LOAN_EVENT_ABI = [
 // Public RPCs cap how many blocks a single eth_getLogs may span.
 const LOG_CHUNK = 9_000n;
 
-const deploymentBlockCache = new Map<string, bigint>();
+/**
+ * Dedicated client for log queries.
+ *
+ * The app's normal transport is Alchemy, whose free tier caps eth_getLogs at a
+ * **10 block range** — far too narrow for loan history spanning tens of
+ * thousands of blocks, and the reason event lists came back empty. Log queries
+ * go through /api/rpc/logs instead, which proxies to an endpoint that serves
+ * wide ranges. Everything else still uses the default client.
+ */
+export function getLogsClient() {
+  return createPublicClient({ chain: sepolia, transport: http('/api/rpc/logs') });
+}
+
+const timestampBlockCache = new Map<string, bigint>();
 
 /**
- * Find the block a contract was deployed in, by binary search on eth_getCode
- * (which returns '0x' before deployment and bytecode after).
+ * Find the first block at or after `targetTimestamp`, by binary search on block
+ * headers.
  *
- * This is deliberately *derived* rather than stored in an env var: contracts get
- * redeployed often here, and a hardcoded block silently returns an empty history
- * the moment it goes stale. ~25 RPC calls, then cached per address for the
- * session — cheap enough to never think about again.
+ * Deliberately timestamp-based rather than probing eth_getCode for a contract's
+ * deployment block: nodes without archive state answer "0x" for blocks they
+ * cannot serve, which is indistinguishable from "not yet deployed" and silently
+ * walks the search past the real start — the history then comes back partially
+ * empty. Block headers are available on every node, so this is reliable
+ * anywhere, and callers already know when their earliest loan was created.
  */
-export async function findDeploymentBlock(
+export async function findBlockByTimestamp(
   client: PublicClient,
-  address: `0x${string}`,
+  targetTimestamp: number,
 ): Promise<bigint> {
-  const key = address.toLowerCase();
-  const cached = deploymentBlockCache.get(key);
+  const key = String(targetTimestamp);
+  const cached = timestampBlockCache.get(key);
   if (cached !== undefined) return cached;
 
-  const latest = await client.getBlockNumber();
-
-  // If there's no code even at head, there's nothing to scan for.
-  const codeNow = await client.getCode({ address });
-  if (!codeNow || codeNow === '0x') {
-    deploymentBlockCache.set(key, latest);
-    return latest;
+  const latest = await client.getBlock();
+  if (Number(latest.timestamp) <= targetTimestamp) {
+    return latest.number ?? BigInt(0);
   }
 
-  let low = 0n;
-  let high = latest;
+  let low = BigInt(0);
+  let high = latest.number ?? BigInt(0);
   while (low < high) {
-    const mid = (low + high) / 2n;
-    let code: string | undefined;
+    const mid = (low + high) / BigInt(2);
+    let ts: number;
     try {
-      code = await client.getCode({ address, blockNumber: mid });
+      const block = await client.getBlock({ blockNumber: mid });
+      ts = Number(block.timestamp);
     } catch {
-      // Some RPCs prune old state; treat as "not yet deployed" and search later.
-      code = '0x';
+      // Can't read this header — assume it's too early and search later.
+      low = mid + BigInt(1);
+      continue;
     }
-    if (!code || code === '0x') low = mid + 1n;
+    if (ts < targetTimestamp) low = mid + BigInt(1);
     else high = mid;
   }
 
-  deploymentBlockCache.set(key, low);
+  timestampBlockCache.set(key, low);
   return low;
 }
 

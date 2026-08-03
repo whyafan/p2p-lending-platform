@@ -1,4 +1,4 @@
-import { createConfig, http } from 'wagmi';
+import { cookieStorage, createConfig, createStorage, http } from 'wagmi';
 import { hardhat, sepolia } from 'wagmi/chains';
 import { metaMask } from 'wagmi/connectors';
 
@@ -37,6 +37,12 @@ function createWagmiConfig() {
     connectors: buildConnectors(),
     multiInjectedProviderDiscovery: false,
     ssr: true,
+    // layout.tsx calls cookieToInitialState(), which can only see state that was
+    // written to a cookie. Without this the config defaulted to localStorage, so
+    // the server always hydrated as "disconnected" and every page load had to
+    // reconnect from scratch — which is what showed connected users a
+    // "connect a wallet" prompt.
+    storage: createStorage({ storage: cookieStorage }),
     transports: {
       [hardhat.id]: http(localRpc),
       [sepolia.id]: http(sepoliaRpc),

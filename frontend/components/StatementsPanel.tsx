@@ -23,6 +23,7 @@ import {
   type StatementRole,
 } from '../lib/statements';
 import { FileText, Download, Loader2 } from 'lucide-react';
+import { useHydrated } from '../hooks/useHydrated';
 
 type LoanTermsTuple = {
   loanContract: `0x${string}`;
@@ -36,12 +37,71 @@ type LoanTermsTuple = {
   createdAt: bigint;
 };
 
+type MyLoan = Omit<StatementLoan, 'events'> & { createdAt: number };
+
+type PeriodKey = 'all' | '30d' | '90d' | 'fy' | 'custom';
+
+const PERIOD_OPTIONS: { key: PeriodKey; label: string }[] = [
+  { key: 'all', label: 'All time' },
+  { key: '30d', label: 'Last 30 days' },
+  { key: '90d', label: 'Last 90 days' },
+  { key: 'fy', label: 'This financial year' },
+  { key: 'custom', label: 'Custom range' },
+];
+
+type Range = { from?: number; to?: number; label: string };
+
+/**
+ * Turn the selected period into unix-second bounds.
+ *
+ * The financial year is Apr 1 -> Mar 31 (Indian FY), since that's the filing
+ * period these statements are modelled on.
+ */
+function resolveRange(period: PeriodKey, customFrom: string, customTo: string): Range {
+  const now = new Date();
+  const day = 24 * 60 * 60;
+  const nowSec = Math.floor(now.getTime() / 1000);
+
+  switch (period) {
+    case '30d':
+      return { from: nowSec - 30 * day, to: nowSec, label: 'Last 30 days' };
+    case '90d':
+      return { from: nowSec - 90 * day, to: nowSec, label: 'Last 90 days' };
+    case 'fy': {
+      const y = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+      const start = Math.floor(Date.UTC(y, 3, 1) / 1000);
+      return { from: start, to: nowSec, label: `FY ${y}-${String((y + 1) % 100).padStart(2, '0')}` };
+    }
+    case 'custom': {
+      const from = customFrom ? Math.floor(new Date(`${customFrom}T00:00:00Z`).getTime() / 1000) : undefined;
+      const to = customTo ? Math.floor(new Date(`${customTo}T23:59:59Z`).getTime() / 1000) : undefined;
+      if (from === undefined && to === undefined) return { label: 'All time' };
+      return { from, to, label: `${customFrom || 'start'} to ${customTo || 'today'}` };
+    }
+    default:
+      return { label: 'All time' };
+  }
+}
+
 export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice: number }) {
-  const { address } = useAccount();
+  // Same rehydration caveat as the dashboards: don't tell an already-connected
+  // user to connect while wagmi is still restoring the session.
+  const { address, isConnecting, isReconnecting } = useAccount();
+  const hydrated = useHydrated();
+  const walletSettling = !hydrated || isConnecting || isReconnecting;
   const chainId = sepolia.id;
   const factoryAddress = process.env.NEXT_PUBLIC_LOAN_FACTORY_ADDRESS_SEPOLIA;
   const [role, setRole] = useState<StatementRole>('lender');
   const [busy, setBusy] = useState<string | null>(null);
+  const [period, setPeriod] = useState<PeriodKey>('all');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+
+  // Resolved reporting window in unix seconds; undefined bound = open-ended.
+  const range = useMemo(
+    () => resolveRange(period, customFrom, customTo),
+    [period, customFrom, customTo],
+  );
 
   const { data: loanIds } = useReadContract({
     address: factoryAddress as `0x${string}` | undefined,
@@ -94,10 +154,10 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
   });
 
   const myLoans = useMemo(() => {
-    if (!loanIds || !termsResults) return [] as Omit<StatementLoan, 'events'>[];
+    if (!loanIds || !termsResults) return [] as MyLoan[];
     const me = address?.toLowerCase();
     if (!me) return [];
-    const out: Omit<StatementLoan, 'events'>[] = [];
+    const out: MyLoan[] = [];
     loanIds.forEach((id, i) => {
       const r = termsResults[i];
       if (r?.status !== 'success') return;
@@ -120,28 +180,54 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
         durationDays: Number(t.durationDays),
         statusVal,
         counterparty: role === 'borrower' ? lenderAddr : t.borrower,
+        createdAt: Number(t.createdAt),
       });
     });
     return out;
   }, [loanIds, termsResults, allAddresses, statusRes, lenderRes, address, role]);
+
+  const earliestCreatedAt = useMemo(() => {
+    const times = myLoans.map((l) => l.createdAt);
+    return times.length > 0 ? Math.min(...times) : undefined;
+  }, [myLoans]);
 
   const { byLoan, priceFor, isLoading } = useLoanEvents({
     factoryAddress,
     loanContracts: myLoans.map((l) => l.loanContract as `0x${string}`),
     chainId,
     ethPrice,
+    fromTimestamp: earliestCreatedAt,
     enabled: myLoans.length > 0,
   });
 
-  const statementLoans: StatementLoan[] = useMemo(
-    () => myLoans.map((l) => ({ ...l, events: byLoan.get(l.loanContract.toLowerCase()) ?? [] })),
-    [myLoans, byLoan],
-  );
+  // Apply the reporting period: keep only events inside it, then drop loans that
+  // had no activity at all in the window — a statement for a period shouldn't
+  // list loans that did nothing during it.
+  const statementLoans: StatementLoan[] = useMemo(() => {
+    const withEvents = myLoans.map((l) => ({
+      ...l,
+      events: (byLoan.get(l.loanContract.toLowerCase()) ?? []).filter((e) => {
+        if (e.timestamp === undefined) return true; // don't silently drop unknowns
+        if (range.from !== undefined && e.timestamp < range.from) return false;
+        if (range.to !== undefined && e.timestamp > range.to) return false;
+        return true;
+      }),
+    }));
+    if (range.from === undefined && range.to === undefined) return withEvents;
+    return withEvents.filter((l) => l.events.length > 0);
+  }, [myLoans, byLoan, range]);
 
   function download(kind: 'pnl' | 'tax' | 'tradebook') {
     setBusy(kind);
     try {
-      const meta = { role, walletAddress: address, email, priceFor, currentEthUsd: ethPrice };
+      const meta = {
+        role,
+        walletAddress: address,
+        email,
+        priceFor,
+        currentEthUsd: ethPrice,
+        periodLabel: range.label,
+      };
       const doc =
         kind === 'pnl'
           ? generatePnl(statementLoans, meta)
@@ -184,8 +270,48 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
         ))}
       </div>
 
+      {/* reporting period */}
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+          Period
+        </label>
+        <select
+          value={period}
+          onChange={(e) => setPeriod(e.target.value as PeriodKey)}
+          className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white focus:border-blue-500 focus:outline-none"
+        >
+          {PERIOD_OPTIONS.map((o) => (
+            <option key={o.key} value={o.key}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+
+        {period === 'custom' && (
+          <>
+            <input
+              type="date"
+              value={customFrom}
+              max={customTo || undefined}
+              onChange={(e) => setCustomFrom(e.target.value)}
+              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-blue-500 focus:outline-none"
+            />
+            <span className="text-xs text-slate-600">to</span>
+            <input
+              type="date"
+              value={customTo}
+              min={customFrom || undefined}
+              onChange={(e) => setCustomTo(e.target.value)}
+              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-blue-500 focus:outline-none"
+            />
+          </>
+        )}
+      </div>
+
       <p className="text-[11px] text-slate-600 mb-4">
-        {!address ? (
+        {walletSettling ? (
+          'Restoring your wallet connection…'
+        ) : !address ? (
           'Connect a wallet to generate statements.'
         ) : isLoading ? (
           <span className="flex items-center gap-1.5">
@@ -193,8 +319,8 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
           </span>
         ) : (
           <>
-            {myLoans.length} loan{myLoans.length === 1 ? '' : 's'} as {role} · {eventCount} recorded
-            transaction{eventCount === 1 ? '' : 's'}
+            {statementLoans.length} loan{statementLoans.length === 1 ? '' : 's'} as {role} ·{' '}
+            {eventCount} recorded transaction{eventCount === 1 ? '' : 's'} · {range.label}
           </>
         )}
       </p>
