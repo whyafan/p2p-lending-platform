@@ -60,6 +60,15 @@ export const SUPPORTED_TOKENS: SupportedToken[] = [
   },
 ];
 
+/**
+ * Tokens usable for a role on a given network.
+ *
+ * The address check is what keeps this honest: the ERC-20 entries above resolve from
+ * env vars that are empty until the mock tokens are deployed, and offering a token the
+ * app has no address for would produce a transaction to the zero address. ETH is exempt
+ * because it is native and has no contract to point at. Today the loan contracts are
+ * ETH-only, so only the ETH entry is ever reachable in the live flow.
+ */
 export function tokensForRole(mode: NetworkMode, role: 'collateral' | 'borrow') {
   return SUPPORTED_TOKENS.filter((token) => {
     if (!token.roles.includes(role)) return false;
