@@ -1,6 +1,6 @@
 # NexusFi P2P Lending Platform - Implementation Report
 
-> Generated 2026-07-29 from the live codebase and PLAN.md.
+> Generated 2026-07-29 from the live codebase and PLAN.md; last updated 2026-08-20 after Phase 2 (peer discovery) shipped.
 > This is a status snapshot of what actually runs, not a spec of intent.
 > For the phased plan of remaining work see `planv2.md`; for the reasoning behind the design see `projectknowledge.md`.
 
@@ -79,6 +79,18 @@ All three are populated in `frontend/.env`. Source-verified on Blockscout and So
 - **T3 downloadable statements** - `lib/statements.ts` + `StatementsPanel.tsx` generate P&L, Tax P&L, and Tradebook PDFs (jsPDF + autoTable) built entirely from indexed events. Surfaced in Settings.
 - Requires migration `004_event_price_snapshots.sql`; without it statements value at current price and label "(est.)".
 
+### Peer discovery (Phase 2, shipped 2026-08-20)
+
+- **`public_profiles` Supabase view** (`005_public_profiles_view.sql`) - non-PII directory source: display name, KYC status, role, and the verified primary wallet address, joined from `profiles` + `linked_wallets`.
+`SELECT` granted to `authenticated` only; `anon` and `PUBLIC` explicitly revoked (a final review caught that Supabase's default grants would otherwise have exposed the directory without login - if migration 005 was applied before commit `589c6fd`, re-run it).
+- **Pure search/lookup logic** in `lib/directory.ts` with 23 unit tests (`lib/directory.test.ts`): query normalisation, name vs wallet-address matching, deterministic ordering before capping.
+- **API routes** - `/api/directory/search` and a profile lookup route; lookup orders deterministically and takes one row instead of assuming one primary wallet per address (DB does not enforce it).
+- **`/directory` search page** with debounced search and a stale-query guard (results from a superseded query never render), plus a nav link.
+- **Profile page** `/directory/[walletAddress]` - `KycBadge` (extracted shared component) and read-only `PublicLoanSummary` showing the user's open loans; expired loan requests are not shown as fundable.
+- Exit criterion met: a user can find another verified user by name or wallet and see their open loans without knowing a loan ID.
+- Verified statically: 132/132 tests, `tsc --noEmit` clean, eslint clean.
+Track F manual browser verification (`tests/MANUAL_TEST_PLAN.md`, needs two accounts) is still outstanding.
+
 ### Auth, KYC, infrastructure
 
 - Supabase auth (login/signup + forgot-password), server + client helpers.
@@ -105,8 +117,10 @@ All three are populated in `frontend/.env`. Source-verified on Blockscout and So
 | `002_rls_and_user_role.sql` / `002_user_role.sql` | RLS + user role |
 | `003_loan_risk_assessments.sql` | borrower risk breakdown keyed by loan contract address, immutable |
 | `004_event_price_snapshots.sql` | per-event ETH/USD price snapshots for fiat statement columns |
+| `005_public_profiles_view.sql` | non-PII `public_profiles` view for the directory, `authenticated`-only access |
 
 > Migrations 003 and 004 must be run manually in the Supabase SQL editor or their features degrade silently by design.
+> Migration 005 must be run at its final version (includes `REVOKE ALL ... FROM anon, PUBLIC`); an earlier applied version left the view readable by `anon`.
 
 ## Verified end-to-end
 
@@ -128,13 +142,16 @@ Fixed the degrade path: the wallet wizard now clearly explains the service is un
 Deploying the backend itself remains Phase 6 scope.
 - **B2** - closed.
 `ethChange24h` in `app/app/page.tsx` looked up `marketData['ethereum']`, but the API keys `marketData` by symbol (`'ETH'`), so the 24h change never rendered and the widget looked static even though the price itself refetches every 30s.
-Fixed the key, relabelled the widget "Current ETH/USD", and added a flash-on-change tick plus a live indicator dot.
+Final merged state (2026-08-03): a teammate independently built a dedicated `EthPriceTicker.tsx` component (directional flash colors, staleness counter); the merge kept their component and ported the `'ETH'` key fix into it, since their version had the same broken lookup.
 - **B3** - closed.
 `RiskExplanationPanel.tsx` restyled to the app's dark theme; the `bg-white` wrapper in `LoanRequestPanel.tsx` that was forcing it light has been removed too.
+Phase 2 (peer discovery) is code-complete and pushed as of 2026-08-20; see the "Peer discovery" section above.
+
 - Liquidation is not automatic (lender must click; no keeper/bot) - deferred to Phase 4.
 - Single-lender funding only (no multi-lender pooling) - deferred to Phase 3.
 - No IPFS-anchored term sheets, no on-chain event indexer/dashboards, no SHAP/versioned ML - deferred to Phase 5/6.
-- No peer discovery (users find each other by loan ID) - deferred to Phase 2.
+- **Peer discovery - closed 2026-08-20** (was "users find each other by loan ID").
+Directory search and public profile pages shipped as Phase 2; only Track F manual browser verification remains open.
 - **BUG-03** - documented, not fixed.
 `interestDue()` already uses a single end-of-period `mulDiv` (maximum precision available in wei-integer accounting); for a small enough principal/duration product the true interest is under 1 wei and floor-divides to 0.
 Accepted MVP limitation, documented in `contracts/contracts/Loan.sol`; a real fix would need a fixed-point interest unit, out of scope for this phase.
