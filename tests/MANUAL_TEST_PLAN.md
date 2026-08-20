@@ -199,6 +199,31 @@ with the balance itself or the contract on a block explorer.
 
 ---
 
+## Track F - Peer discovery (do after A)
+
+Needs two accounts that can already see each other in Track A/C, at least one with an open loan
+request and one with a funded position so both sections of the profile page have something to show.
+
+- [ ] **F1 Search by name** - From account 1, go to Find a user (or `/directory`), search the first
+      few characters of account 2's display name. Verify account 2 appears, account 1 does not
+      appear in its own results, and typing a single character shows no results and fires no request
+- [ ] **F2 Search by wallet** - Search the last 6 characters of account 2's wallet address instead.
+      Verify the same result appears
+- [ ] **F3 View profile** - Click into account 2's result. Verify display name, KYC badge, role
+      badge, and full wallet address (with working copy + Etherscan link) all match what account 2
+      sees on their own `/settings` page
+- [ ] **F4 Open requests visible** - If account 2 has an open (unfunded) loan request, verify it
+      shows under "Open loan requests" on their profile, with no fund/repay/liquidate button anywhere
+      on the page
+- [ ] **F5 Active positions visible** - If account 2 has funded someone else's loan, verify it shows
+      under "Active positions" the same way
+- [ ] **F6 Unverified/unknown wallet** - Visit `/directory/0x0000000000000000000000000000000000dead`
+      directly. Verify "User not found or not verified", not a crash or blank page
+- [ ] **F7 Signed out** - Log out, then visit `/directory` and `/directory/<any wallet>` directly.
+      Verify both redirect to `/`
+
+---
+
 ## Findings log
 
 | Date | Track/step | What happened | Expected | Severity |
