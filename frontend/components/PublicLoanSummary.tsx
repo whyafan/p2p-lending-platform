@@ -8,6 +8,17 @@ import { formatUsd, formatPercent } from '../lib/format';
 
 const POLL_MS = 5_000;
 
+// Mirrors LenderDashboard.tsx's FUNDING_WINDOW_SECS/isExpired: a Requested
+// loan whose funding window has passed will never actually fund (fund()
+// reverts on-chain), but nothing moves its status off Requested, so it has
+// to be filtered out client-side the same way LenderDashboard does.
+const FUNDING_WINDOW_SECS = 7 * 24 * 60 * 60;
+
+function isExpired(createdAt: bigint): boolean {
+  const deadline = Number(createdAt) + FUNDING_WINDOW_SECS;
+  return Math.floor(Date.now() / 1000) > deadline;
+}
+
 type LoanTermsTuple = {
   loanContract: `0x${string}`;
   borrower: `0x${string}`;
@@ -138,6 +149,7 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
         if (statusByAddress.get(addrKey) !== wantedStatus) return null;
         if (mode === 'borrower') {
           if (terms.borrower.toLowerCase() !== targetAddress.toLowerCase()) return null;
+          if (isExpired(terms.createdAt)) return null;
         } else {
           const lenderAddr = lenderByAddress.get(addrKey);
           if (lenderAddr?.toLowerCase() !== targetAddress.toLowerCase()) return null;
@@ -147,7 +159,15 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
       .filter((l): l is { id: bigint; terms: LoanTermsTuple } => l !== null);
   }, [loanIds, termsResults, statusByAddress, lenderByAddress, mode, targetAddress]);
 
-  const isLoading = idsLoading || termsLoading;
+  // idsLoading/termsLoading alone cover only the first two read rounds. The
+  // status/lender round only starts once loanContractAddresses is populated
+  // (its query is `enabled` on contracts.length > 0), so without also
+  // waiting on it here, the component would render "No open requests." for
+  // one extra RPC round trip on every load, right as matchingLoans becomes
+  // computable off of not-yet-loaded status/lender data.
+  const statusLoading = statusContracts.length > 0 && statusResults === undefined;
+  const lenderLoading = lenderContracts.length > 0 && lenderResults === undefined;
+  const isLoading = idsLoading || termsLoading || statusLoading || lenderLoading;
 
   if (!isDeployed) {
     return <p className="text-xs text-slate-600">Contracts not configured.</p>;

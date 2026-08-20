@@ -40,6 +40,14 @@ describe('buildLikePattern', () => {
   it('escapes literal backslashes', () => {
     assert.equal(buildLikePattern('a\\b'), '%a\\\\b%');
   });
+  it('escapes literal asterisks, which PostgREST otherwise treats as an alias for %', () => {
+    // PostgREST substitutes every unescaped '*' in a like/ilike value for '%'
+    // before it reaches Postgres, so an unescaped '**' search would become
+    // the match-everything pattern '%%%%%'. Escaped, each '*' survives
+    // PostgREST's substitution as '\%' (a literal-percent match), not as a
+    // wildcard - it no longer matches everything.
+    assert.equal(buildLikePattern('**'), '%\\*\\*%');
+  });
 });
 
 describe('normalizeWalletAddressParam', () => {

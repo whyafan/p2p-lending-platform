@@ -23,18 +23,26 @@ export async function GET(req: NextRequest) {
   // authenticated role directly, so the RLS-scoped session client is
   // enough here. No admin/service-role client needed, matching migration
   // 002's goal that teammates can run the app without one.
+  //
+  // .order() runs before .limit() takes effect on Postgres' side, so the
+  // cap picks a deterministic 20 rows instead of an arbitrary 20 out of
+  // however many match - without it, Postgres is free to return a
+  // different arbitrary subset on each request, and the client-side sort
+  // in mergeSearchResults only reorders whatever arbitrary subset arrived.
   const [byName, byWallet] = await Promise.all([
     session.serverClient
       .from('public_profiles')
       .select(SELECT_COLUMNS)
       .neq('id', session.profile.id)
       .ilike('display_name', pattern)
+      .order('display_name')
       .limit(MAX_RESULTS),
     session.serverClient
       .from('public_profiles')
       .select(SELECT_COLUMNS)
       .neq('id', session.profile.id)
       .ilike('wallet_address', pattern)
+      .order('display_name')
       .limit(MAX_RESULTS),
   ]);
 

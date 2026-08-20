@@ -19,9 +19,18 @@ export function normalizeSearchQuery(raw: string | null): string | null {
   return trimmed.length >= 2 ? trimmed : null;
 }
 
-/** Escapes ILIKE wildcard/escape characters and wraps the query for a substring match. */
+/**
+ * Escapes ILIKE wildcard/escape characters and wraps the query for a
+ * substring match. Covers backslash (the escape char itself), % and _ (the
+ * real Postgres LIKE wildcards), and * (PostgREST's own alias for % in
+ * like/ilike filter values - see https://postgrest.org, "to avoid URL
+ * encoding you can use * as an alias of the percent sign %"). PostgREST
+ * substitutes every literal * for % with no escape-awareness of its own, so
+ * an unescaped * here would still expand into a wildcard downstream even
+ * though this function is the one place callers rely on to neutralize them.
+ */
 export function buildLikePattern(query: string): string {
-  const escaped = query.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const escaped = query.replace(/[\\%_*]/g, (c) => `\\${c}`);
   return `%${escaped}%`;
 }
 
