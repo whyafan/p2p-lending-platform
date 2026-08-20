@@ -113,10 +113,10 @@ describe("NexusFi Milestone 1", async function () {
     });
 
     await viem.assertions.emitWithArgs(
-      loan.write.fund({ account: lender.account, value: principalAmount }),
+      loan.write.contribute({ account: lender.account, value: principalAmount }),
       loan,
       "LoanFunded",
-      [0n, getAddress(lender.account.address), principalAmount],
+      [0n, principalAmount],
     );
 
     const borrowerBalanceAfter = await publicClient.getBalance({
@@ -124,7 +124,7 @@ describe("NexusFi Milestone 1", async function () {
     });
 
     assert.equal(await loan.read.status(), 1);
-    assert.equal((await loan.read.lender()).toLowerCase(), lender.account.address.toLowerCase());
+    assert.equal(await loan.read.contributions([lender.account.address]), principalAmount);
     assert.equal(borrowerBalanceAfter - borrowerBalanceBefore, principalAmount);
   });
 });

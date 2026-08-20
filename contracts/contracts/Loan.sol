@@ -27,6 +27,15 @@ contract Loan is ReentrancyGuard {
     // Grace period after the repayment deadline before a lender may liquidate.
     uint256 public constant GRACE_PERIOD = 2 days;
 
+    // Bounds every distribution loop's gas. Small by design: a pool of a few
+    // teammates, not an open crowd sale.
+    uint256 public constant MAX_LENDERS = 10;
+
+    // Gas forwarded on push transfers. Enough for an EOA or a simple contract
+    // wallet receive; a recipient that needs more gets credited for pull
+    // withdrawal instead of blocking everyone else.
+    uint256 internal constant PUSH_GAS_LIMIT = 50_000;
+
     enum LoanStatus {
         Requested,
         Funded,
@@ -38,7 +47,6 @@ contract Loan is ReentrancyGuard {
     uint256 public immutable loanId;
     address public immutable factory;
     address public immutable borrower;
-    address public lender;
     address public immutable collateralVault;
 
     uint256 public immutable principalAmount;
@@ -54,6 +62,20 @@ contract Loan is ReentrancyGuard {
     /// price-based liquidation is simply disabled and only the repayment
     /// deadline can trigger liquidation.
     address public immutable priceFeed;
+
+    // --- Multi-lender pool state -------------------------------------------
+    //
+    // Contributions escrow in this contract while the loan is Requested. The
+    // borrower is paid only when the pool fills. contributions[] is the source
+    // of truth for membership; _lenders may retain reclaimed addresses whose
+    // contribution has returned to zero (distribution loops skip them because
+    // a zero contribution produces a zero share, and reclaim is only possible
+    // before funding while distribution only happens after).
+    address[] private _lenders;
+    mapping(address => uint256) public contributions;
+    uint256 public totalContributed;
+    // Failed push transfers accumulate here for pull withdrawal.
+    mapping(address => uint256) public pendingWithdrawals;
 
     // --- Price-based liquidation state -------------------------------------
     //
@@ -91,7 +113,11 @@ contract Loan is ReentrancyGuard {
 
     LoanStatus public status;
 
-    event LoanFunded(uint256 indexed loanId, address indexed lender, uint256 amount);
+    event Contribution(uint256 indexed loanId, address indexed contributor, uint256 amount, uint256 totalContributed);
+    event LoanFunded(uint256 indexed loanId, uint256 totalContributed);
+    event ShareDistributed(uint256 indexed loanId, address indexed lender, uint256 amount, bool pending);
+    event Withdrawal(uint256 indexed loanId, address indexed lender, uint256 amount);
+    event ContributionReclaimed(uint256 indexed loanId, address indexed contributor, uint256 amount);
     event LoanRepaid(uint256 indexed loanId, address indexed borrower, uint256 repaymentAmount);
     event PartialRepayment(
         uint256 indexed loanId,
@@ -111,11 +137,6 @@ contract Loan is ReentrancyGuard {
 
     modifier onlyBorrower() {
         require(msg.sender == borrower, "Loan: caller is not borrower");
-        _;
-    }
-
-    modifier onlyLender() {
-        require(msg.sender == lender, "Loan: caller is not lender");
         _;
     }
 
@@ -155,34 +176,96 @@ contract Loan is ReentrancyGuard {
         status = LoanStatus.Requested;
     }
 
-    function fund() external payable nonReentrant {
+    /// Seizure proceeds arrive here from the vault during liquidate(); nothing
+    /// else may send plain ETH (contributions must go through contribute()).
+    receive() external payable {
+        require(msg.sender == collateralVault, "Loan: direct transfers not accepted");
+    }
+
+    /// 1% of principal, floor 1 wei, applied per call (top-ups included). When
+    /// the remaining gap is under the minimum, the closing contributor still
+    /// sends at least the minimum and the excess is refunded in the same tx.
+    function minContribution() public view returns (uint256) {
+        uint256 m = principalAmount / 100;
+        return m == 0 ? 1 : m;
+    }
+
+    function contribute() external payable nonReentrant {
         require(status == LoanStatus.Requested, "Loan: not fundable");
         require(block.timestamp <= requestedAt + FUNDING_WINDOW, "Loan: funding window has expired");
         require(msg.sender != borrower, "Loan: borrower cannot fund");
-        require(msg.value == principalAmount, "Loan: exact principal required");
+        require(msg.value >= minContribution(), "Loan: below minimum contribution");
 
-        lender = msg.sender;
-        fundedAt = block.timestamp;
-        status = LoanStatus.Funded;
-
-        // Freeze the USD value of the debt at funding. If the oracle is absent
-        // or unhealthy this stays 0, which disables price-based liquidation for
-        // this loan rather than letting bad data seize someone's collateral.
-        uint256 price = _readPrice();
-        if (price > 0) {
-            priceAtFunding = price;
-            debtValueUsd = principalAmount * price;
+        if (contributions[msg.sender] == 0) {
+            require(_lenders.length < MAX_LENDERS, "Loan: lender cap reached");
+            _lenders.push(msg.sender);
         }
 
-        payable(borrower).sendValue(msg.value);
-        emit LoanFunded(loanId, msg.sender, msg.value);
+        uint256 remaining = principalAmount - totalContributed;
+        uint256 accepted = msg.value > remaining ? remaining : msg.value;
+        uint256 refund = msg.value - accepted;
+
+        contributions[msg.sender] += accepted;
+        totalContributed += accepted;
+        emit Contribution(loanId, msg.sender, accepted, totalContributed);
+
+        if (totalContributed == principalAmount) {
+            fundedAt = block.timestamp;
+            status = LoanStatus.Funded;
+
+            // Freeze the USD value of the debt at funding. If the oracle is
+            // absent or unhealthy this stays 0, which disables price-based
+            // liquidation for this loan rather than letting bad data seize
+            // someone's collateral.
+            uint256 price = _readPrice();
+            if (price > 0) {
+                priceAtFunding = price;
+                debtValueUsd = principalAmount * price;
+            }
+
+            payable(borrower).sendValue(principalAmount);
+            emit LoanFunded(loanId, totalContributed);
+        }
+
+        if (refund > 0) {
+            payable(msg.sender).sendValue(refund);
+        }
+    }
+
+    /// Pull-based refund of an escrowed contribution, once the pool can no
+    /// longer complete: the borrower cancelled, or the funding window expired
+    /// with the loan still Requested. Each contributor reclaims their own.
+    function reclaimContribution() external nonReentrant {
+        bool expiredWhileRequested =
+            status == LoanStatus.Requested && block.timestamp > requestedAt + FUNDING_WINDOW;
+        require(status == LoanStatus.Cancelled || expiredWhileRequested, "Loan: nothing to reclaim");
+
+        uint256 amount = contributions[msg.sender];
+        require(amount > 0, "Loan: no contribution");
+
+        contributions[msg.sender] = 0;
+        totalContributed -= amount;
+
+        payable(msg.sender).sendValue(amount);
+        emit ContributionReclaimed(loanId, msg.sender, amount);
+    }
+
+    /// Collect shares that could not be pushed (recipient reverted or ran out
+    /// of the forwarded gas). Callable in any loan status.
+    function withdraw() external nonReentrant {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        require(amount > 0, "Loan: nothing to withdraw");
+
+        pendingWithdrawals[msg.sender] = 0;
+        payable(msg.sender).sendValue(amount);
+        emit Withdrawal(loanId, msg.sender, amount);
     }
 
     // Partial payments are supported: any call may pay less than the full
-    // outstanding balance. Each payment is forwarded to the lender immediately
-    // (no escrow), matching this contract's existing instant-settlement pattern.
-    // The loan only transitions to Repaid — releasing collateral — once
-    // amountRepaid reaches the live outstandingBalance().
+    // outstanding balance. Each payment is split pro-rata across contributors
+    // immediately (no escrow), matching this contract's existing
+    // instant-settlement pattern. The loan only transitions to Repaid —
+    // releasing collateral — once amountRepaid reaches the live outstandingBalance().
     function repay() external payable onlyBorrower nonReentrant {
         require(status == LoanStatus.Funded, "Loan: not active");
         require(msg.value > 0, "Loan: repayment must be non-zero");
@@ -201,7 +284,8 @@ contract Loan is ReentrancyGuard {
             closedAt = block.timestamp;
         }
 
-        payable(lender).sendValue(applied);
+        _distribute(applied);
+
         if (refund > 0) {
             payable(msg.sender).sendValue(refund);
         }
@@ -220,6 +304,8 @@ contract Loan is ReentrancyGuard {
         status = LoanStatus.Cancelled;
         ICollateralVault(collateralVault).releaseCollateral(loanId, payable(borrower));
         emit LoanCancelled(loanId);
+        // Escrowed contributions stay here until each contributor calls
+        // reclaimContribution(); status Cancelled is what unlocks it.
     }
 
     /// @notice Demo-only: rewind this loan's clock so time-gated behaviour can be
@@ -234,7 +320,7 @@ contract Loan is ReentrancyGuard {
         require(demoMode(), "Loan: demo mode disabled");
         require(secondsToSkip > 0, "Loan: nothing to skip");
         require(
-            msg.sender == borrower || msg.sender == lender,
+            msg.sender == borrower || contributions[msg.sender] > 0,
             "Loan: not a participant"
         );
 
@@ -254,7 +340,12 @@ contract Loan is ReentrancyGuard {
     //   2. Collateral shortfall — oracle-priced LTV at or above the liquidation
     //      threshold (maxLtv + buffer), i.e. an ETH price crash.
     // Replaces the old unconditional markLiquidatedForDemo() bypass.
-    function liquidate() external onlyLender nonReentrant {
+    //
+    /// Any contributor may trigger liquidation; a pool must not depend on one
+    /// specific person clicking. Seizure proceeds route through this contract
+    /// (see receive()) and are split pro-rata like a repayment.
+    function liquidate() external nonReentrant {
+        require(contributions[msg.sender] > 0, "Loan: caller is not a lender");
         require(status == LoanStatus.Funded, "Loan: not active");
         require(
             isDelinquentLiquidatable() || isPriceLiquidatable(),
@@ -263,7 +354,7 @@ contract Loan is ReentrancyGuard {
 
         // Seize only what is actually still owed; the surplus goes back to the
         // borrower. Both the debt and the collateral are ETH-denominated, so no
-        // oracle conversion is needed to make the lender whole. Partial
+        // oracle conversion is needed to make the lenders whole. Partial
         // repayments therefore shrink the seizure pound for pound.
         uint256 owed = outstandingBalance();
         uint256 seizeAmount = owed < collateralAmount ? owed : collateralAmount;
@@ -272,16 +363,64 @@ contract Loan is ReentrancyGuard {
         status = LoanStatus.Liquidated;
         closedAt = block.timestamp;
 
-        ICollateralVault(collateralVault).liquidateCollateral(loanId, payable(lender), seizeAmount);
+        ICollateralVault(collateralVault).liquidateCollateral(loanId, payable(address(this)), seizeAmount);
+        _distribute(seizeAmount);
         emit LoanLiquidated(loanId, msg.sender, seizeAmount, refund);
     }
 
-    /// What a lender would seize right now, and what the borrower would keep.
+    /// What the pool would seize right now, and what the borrower would keep.
     /// Lets both sides see the split before anyone clicks Liquidate.
     function liquidationPreview() external view returns (uint256 seizeAmount, uint256 refundAmount) {
         uint256 owed = outstandingBalance();
         seizeAmount = owed < collateralAmount ? owed : collateralAmount;
         refundAmount = collateralAmount - seizeAmount;
+    }
+
+    // --- Distribution internals --------------------------------------------
+
+    /// Split `amount` pro-rata by contribution over principal. The last lender
+    /// receives `amount` minus the sum of the earlier floors, so the total
+    /// distributed always equals `amount` exactly (rounding dust, a few wei at
+    /// most, lands deterministically on the last contributor).
+    function _distribute(uint256 amount) internal {
+        uint256 n = _lenders.length;
+        uint256 distributed = 0;
+        for (uint256 i = 0; i < n; i++) {
+            address lender_ = _lenders[i];
+            uint256 share;
+            if (i == n - 1) {
+                share = amount - distributed;
+            } else {
+                share = Math.mulDiv(amount, contributions[lender_], principalAmount);
+            }
+            distributed += share;
+            if (share > 0) {
+                _pushOrCredit(lender_, share);
+            }
+        }
+    }
+
+    /// Hybrid settlement: try a gas-capped push; on failure credit the share
+    /// for pull withdrawal. A reverting recipient can only hurt itself and can
+    /// never block the borrower's repayment or a liquidation.
+    function _pushOrCredit(address lender_, uint256 share) internal {
+        (bool ok, ) = payable(lender_).call{value: share, gas: PUSH_GAS_LIMIT}("");
+        if (ok) {
+            emit ShareDistributed(loanId, lender_, share, false);
+        } else {
+            pendingWithdrawals[lender_] += share;
+            emit ShareDistributed(loanId, lender_, share, true);
+        }
+    }
+
+    // --- Views ---------------------------------------------------------------
+
+    function getLenders() external view returns (address[] memory) {
+        return _lenders;
+    }
+
+    function fundingProgressBps() external view returns (uint256) {
+        return Math.mulDiv(totalContributed, 10_000, principalAmount);
     }
 
     // Reads the oracle defensively: a missing or reverting feed yields 0 rather
@@ -342,7 +481,7 @@ contract Loan is ReentrancyGuard {
     // that's "now"; once closed, it's frozen at closedAt so a settled loan's
     // outstanding balance never drifts. Either way, capped at the point the
     // loan becomes liquidatable — delinquency past that point doesn't inflate
-    // the debt further, it just means the lender's recourse is to liquidate.
+    // the debt further, it just means the lenders' recourse is to liquidate.
     function _interestAccrualEnd() internal view returns (uint256) {
         uint256 cap = repaymentDueAt() + GRACE_PERIOD;
         uint256 end = status == LoanStatus.Funded ? block.timestamp : (closedAt != 0 ? closedAt : fundedAt);
