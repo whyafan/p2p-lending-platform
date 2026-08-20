@@ -56,7 +56,7 @@ describe('normalizeWalletAddressParam', () => {
     assert.equal(normalizeWalletAddressParam('0xabc123'), null);
   });
   it('rejects non-hex characters', () => {
-    assert.equal(normalizeWalletAddressParam('0xzzz123000000000000000000000000000dead'), null);
+    assert.equal(normalizeWalletAddressParam('0xzzz123000000000000000000000000000000dead'), null);
   });
   it('rejects an address with too few hex characters', () => {
     assert.equal(normalizeWalletAddressParam('0x123456789abcdef'), null);
@@ -73,14 +73,14 @@ describe('shapeDirectoryProfile', () => {
       display_name: 'Alice',
       kyc_status: 'APPROVED',
       user_role: 'borrower',
-      wallet_address: '0xabc1230000000000000000000000000000dead',
+      wallet_address: '0xabc123000000000000000000000000000000dead',
     };
     assert.deepEqual(shapeDirectoryProfile(row), {
       id: 'user-1',
       displayName: 'Alice',
       kycStatus: 'APPROVED',
       userRole: 'borrower',
-      walletAddress: '0xabc1230000000000000000000000000000dead',
+      walletAddress: '0xabc123000000000000000000000000000000dead',
     });
   });
   it('passes through a null display name and null role', () => {
@@ -89,7 +89,7 @@ describe('shapeDirectoryProfile', () => {
       display_name: null,
       kyc_status: 'NOT_STARTED',
       user_role: null,
-      wallet_address: '0xdead000000000000000000000000000000beef',
+      wallet_address: '0xdead00000000000000000000000000000000beef',
     };
     const shaped = shapeDirectoryProfile(row);
     assert.equal(shaped.displayName, null);
