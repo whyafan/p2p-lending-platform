@@ -42,3 +42,11 @@ export type AuditLog = {
   metadata: string | null;
   created_at: string;
 };
+
+export type PublicProfile = {
+  id: string;
+  display_name: string | null;
+  kyc_status: string;
+  user_role: string | null;
+  wallet_address: string;
+};
