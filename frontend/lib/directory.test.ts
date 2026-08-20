@@ -50,13 +50,19 @@ describe('normalizeWalletAddressParam', () => {
     );
   });
   it('rejects a value missing the 0x prefix', () => {
-    assert.equal(normalizeWalletAddressParam('abc1230000000000000000000000000000dead'), null);
+    assert.equal(normalizeWalletAddressParam('abc123000000000000000000000000000000dead'), null);
   });
   it('rejects a value of the wrong length', () => {
     assert.equal(normalizeWalletAddressParam('0xabc123'), null);
   });
   it('rejects non-hex characters', () => {
-    assert.equal(normalizeWalletAddressParam('0xzzz1230000000000000000000000000000dead'), null);
+    assert.equal(normalizeWalletAddressParam('0xzzz123000000000000000000000000000dead'), null);
+  });
+  it('rejects an address with too few hex characters', () => {
+    assert.equal(normalizeWalletAddressParam('0x123456789abcdef'), null);
+  });
+  it('rejects an address with too many hex characters', () => {
+    assert.equal(normalizeWalletAddressParam('0x123456789abcdef0123456789abcdef0123456789'), null);
   });
 });
 
@@ -94,11 +100,11 @@ describe('shapeDirectoryProfile', () => {
 describe('mergeSearchResults', () => {
   const alice: PublicProfileRow = {
     id: 'u1', display_name: 'Alice', kyc_status: 'APPROVED', user_role: 'borrower',
-    wallet_address: '0x1111111111111111111111111111111111111a',
+    wallet_address: '0x11111111111111111111111111111111111111aa',
   };
   const bob: PublicProfileRow = {
     id: 'u2', display_name: 'Bob', kyc_status: 'APPROVED', user_role: 'lender',
-    wallet_address: '0x2222222222222222222222222222222222222b',
+    wallet_address: '0x22222222222222222222222222222222222222bb',
   };
 
   it('deduplicates a row that matched both queries by id', () => {
@@ -111,11 +117,23 @@ describe('mergeSearchResults', () => {
     assert.deepEqual(result.map((r) => r.id), ['u1', 'u2']);
   });
   it('respects the limit after merging', () => {
-    const result = mergeSearchResults([alice], [bob], 1);
+    const result = mergeSearchResults([bob], [alice], 1);
     assert.equal(result.length, 1);
+    assert.equal(result[0].id, 'u1');
   });
   it('returns camelCase shapes, not raw rows', () => {
     const result = mergeSearchResults([alice], [], 20);
     assert.equal(result[0].displayName, 'Alice');
+  });
+  it('sorts null display names before named records', () => {
+    const charlie: PublicProfileRow = {
+      id: 'u3', display_name: null, kyc_status: 'APPROVED', user_role: 'borrower',
+      wallet_address: '0x33333333333333333333333333333333333333cc',
+    };
+    const result = mergeSearchResults([alice], [charlie], 20);
+    assert.equal(result.length, 2);
+    assert.equal(result[0].id, 'u3');
+    assert.equal(result[0].displayName, null);
+    assert.equal(result[1].id, 'u1');
   });
 });
