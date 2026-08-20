@@ -319,14 +319,20 @@ contract Loan is ReentrancyGuard {
     function fastForward(uint256 secondsToSkip) external {
         require(demoMode(), "Loan: demo mode disabled");
         require(secondsToSkip > 0, "Loan: nothing to skip");
-        require(
-            msg.sender == borrower || contributions[msg.sender] > 0,
-            "Loan: not a participant"
-        );
 
         if (status == LoanStatus.Requested) {
+            // Borrower-only while Requested: a contributor must not be able to
+            // rewind the funding window. Otherwise a contributor could put in
+            // the 1% minimum, fastForward past FUNDING_WINDOW to expire the
+            // loan, then reclaimContribution() in the same block - permanently
+            // bricking the pool for every other contributor for the cost of gas.
+            require(msg.sender == borrower, "Loan: not a participant");
             requestedAt = secondsToSkip >= requestedAt ? 0 : requestedAt - secondsToSkip;
         } else if (status == LoanStatus.Funded) {
+            require(
+                msg.sender == borrower || contributions[msg.sender] > 0,
+                "Loan: not a participant"
+            );
             fundedAt = secondsToSkip >= fundedAt ? 0 : fundedAt - secondsToSkip;
         } else {
             revert("Loan: loan is closed");

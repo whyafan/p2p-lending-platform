@@ -181,7 +181,7 @@ describe("Multi-lender funding phase", async function () {
   it("lets contributors reclaim from an expired, partially filled loan", async function () {
     const { loan } = await deployRequestedLoan();
     await loan.write.contribute({ account: lenderA.account, value: parseEther("0.4") });
-    await loan.write.fastForward([8n * DAY], { account: lenderA.account }); // contributor may fastForward
+    await loan.write.fastForward([8n * DAY], { account: borrower.account }); // only the borrower may expire a Requested loan
 
     await viem.assertions.emit(
       loan.write.reclaimContribution({ account: lenderA.account }),
@@ -189,6 +189,23 @@ describe("Multi-lender funding phase", async function () {
       "ContributionReclaimed",
     );
     assert.equal(await loan.read.totalContributed(), 0n);
+  });
+
+  it("rejects a contributor fastForwarding a Requested loan, but allows the borrower", async function () {
+    const { loan } = await deployRequestedLoan();
+    const min = await loan.read.minContribution();
+    await loan.write.contribute({ account: lenderA.account, value: min });
+
+    await viem.assertions.revertWith(
+      loan.write.fastForward([8n * DAY], { account: lenderA.account }),
+      "Loan: not a participant",
+    );
+
+    await loan.write.fastForward([8n * DAY], { account: borrower.account }); // window is 7 days
+    await viem.assertions.revertWith(
+      loan.write.contribute({ account: lenderB.account, value: min }),
+      "Loan: funding window has expired",
+    );
   });
 
   it("reverts reclaim while the loan is still fundable", async function () {
