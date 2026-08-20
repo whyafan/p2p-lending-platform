@@ -421,6 +421,14 @@ export default function AppPage() {
             Change role
           </Link>
 
+          <Link
+            href="/directory"
+            className="text-xs font-bold text-slate-600 hover:text-white transition-colors"
+            title="Search for another verified user"
+          >
+            Find a user
+          </Link>
+
           {/* Live market price — labelled and ticking, not a stale snapshot */}
           <EthPriceTicker price={ethPrice} change24h={ethChange24h} updatedAt={priceData?.updatedAt} />
         </div>
