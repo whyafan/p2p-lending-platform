@@ -25,13 +25,27 @@ function shortAddress(address: string): string {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
+type SearchStatus = {
+  // The query these results/error/isSearching belong to. Rendering must
+  // check this against the live input value before showing anything -
+  // that is what stops a previous query's data from being displayed
+  // under a new query's heading during the debounce window.
+  query: string;
+  isSearching: boolean;
+  results: SearchResult[];
+  error: string | null;
+};
+
 export default function DirectoryPage() {
   const router = useRouter();
   const compliance = useCompliance();
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
+  const [status, setStatus] = useState<SearchStatus>({
+    query: '',
+    isSearching: false,
+    results: [],
+    error: null,
+  });
 
   useEffect(() => {
     if (compliance.isLoading) return;
@@ -41,9 +55,9 @@ export default function DirectoryPage() {
   useEffect(() => {
     const trimmed = query.trim();
     // Below the minimum length there is nothing to synchronize with the
-    // server, so the effect does nothing. Stale results/error/loading
-    // state from a longer query is simply not rendered (see trimmedQuery
-    // below) rather than reset here, since a plain reset with no external
+    // server, so the effect does nothing. Stale status from a longer
+    // query is simply not rendered (see showQueryState below) rather
+    // than reset here, since a plain reset with no external
     // synchronization is state that belongs in render, not in an effect.
     if (trimmed.length < 2) return;
 
@@ -55,20 +69,16 @@ export default function DirectoryPage() {
 
     const timer = setTimeout(async () => {
       if (cancelled) return;
-      setIsSearching(true);
-      setSearchError(null);
+      setStatus({ query: trimmed, isSearching: true, results: [], error: null });
       try {
         const res = await fetch(`/api/directory/search?q=${encodeURIComponent(trimmed)}`);
         if (!res.ok) throw new Error('Search failed');
         const data = await res.json();
         if (cancelled) return;
-        setResults(data.results ?? []);
+        setStatus({ query: trimmed, isSearching: false, results: data.results ?? [], error: null });
       } catch {
         if (cancelled) return;
-        setSearchError('Search failed. Try again.');
-        setResults([]);
-      } finally {
-        if (!cancelled) setIsSearching(false);
+        setStatus({ query: trimmed, isSearching: false, results: [], error: 'Search failed. Try again.' });
       }
     }, 300);
 
@@ -87,7 +97,12 @@ export default function DirectoryPage() {
   }
 
   const trimmedQuery = query.trim();
-  const showQueryState = trimmedQuery.length >= 2;
+  // Only treat status as displayable once it was produced for the exact
+  // query currently in the input. While a newer query is debouncing (or
+  // has not fired its request yet), status.query still names the old
+  // query, so nothing renders instead of showing stale results/error/
+  // "no results" for a query that hasn't been searched yet.
+  const showQueryState = trimmedQuery.length >= 2 && status.query === trimmedQuery;
 
   return (
     <div className="min-h-screen bg-[#0a0e1a] px-4 py-8">
@@ -111,16 +126,16 @@ export default function DirectoryPage() {
           />
         </div>
 
-        {showQueryState && isSearching && <p className="text-xs text-slate-600">Searching...</p>}
+        {showQueryState && status.isSearching && <p className="text-xs text-slate-600">Searching...</p>}
 
-        {showQueryState && searchError && <p className="text-xs text-red-400">{searchError}</p>}
+        {showQueryState && status.error && <p className="text-xs text-red-400">{status.error}</p>}
 
-        {showQueryState && !isSearching && !searchError && results.length === 0 && (
+        {showQueryState && !status.isSearching && !status.error && status.results.length === 0 && (
           <p className="text-xs text-slate-600">No verified users found for &quot;{trimmedQuery}&quot;.</p>
         )}
 
         <div className="space-y-2">
-          {showQueryState && results.map((r) => (
+          {showQueryState && status.results.map((r) => (
             <button
               key={r.id}
               type="button"
