@@ -88,12 +88,12 @@ contract Loan is ReentrancyGuard {
     //   LTV              = debtValueUsd / collateralValueUsd
     //
     // So if ETH falls, the collateral securing the loan is worth less against a
-    // fixed USD debt, LTV climbs, and the position becomes liquidatable — which
+    // fixed USD debt, LTV climbs, and the position becomes liquidatable - which
     // is exactly the worked example in the project brief ($1,400 debt against
     // $2,000 collateral liquidating once collateral falls to $1,750).
     //
     // Both values carry units of wei x USD; the ratio is dimensionless, so no
-    // rescaling is needed. Settlement stays ETH-denominated (see repay()) —
+    // rescaling is needed. Settlement stays ETH-denominated (see repay()) -
     // the USD figure exists to measure the lender's exposure, not to restate
     // what the borrower owes.
     uint256 public debtValueUsd;
@@ -102,7 +102,7 @@ contract Loan is ReentrancyGuard {
 
     // Cumulative wei applied toward totalRepaymentDue() so far. Repayment is a
     // lump sum against the live outstanding balance (no principal/interest split,
-    // no amortization) — interest keeps accruing on the full original
+    // no amortization) - interest keeps accruing on the full original
     // principalAmount, capped once the loan becomes liquidatable (see
     // interestDue()). This is a deliberate simplification for the MVP.
     uint256 public amountRepaid;
@@ -171,7 +171,7 @@ contract Loan is ReentrancyGuard {
         maxLtvBps = maxLtvBps_;
         liquidationBufferBps = liquidationBufferBps_;
         collateralVault = collateralVault_;
-        priceFeed = priceFeed_; // address(0) allowed — disables price-based liquidation
+        priceFeed = priceFeed_; // address(0) allowed - disables price-based liquidation
         requestedAt = block.timestamp;
         status = LoanStatus.Requested;
     }
@@ -264,8 +264,8 @@ contract Loan is ReentrancyGuard {
     // Partial payments are supported: any call may pay less than the full
     // outstanding balance. Each payment is split pro-rata across contributors
     // immediately (no escrow), matching this contract's existing
-    // instant-settlement pattern. The loan only transitions to Repaid —
-    // releasing collateral — once amountRepaid reaches the live outstandingBalance().
+    // instant-settlement pattern. The loan only transitions to Repaid -
+    // releasing collateral - once amountRepaid reaches the live outstandingBalance().
     function repay() external payable onlyBorrower nonReentrant {
         require(status == LoanStatus.Funded, "Loan: not active");
         require(msg.value > 0, "Loan: repayment must be non-zero");
@@ -311,7 +311,7 @@ contract Loan is ReentrancyGuard {
     /// @notice Demo-only: rewind this loan's clock so time-gated behaviour can be
     ///         exercised immediately instead of waiting real days.
     /// @dev Works by moving the loan's own timestamps *backwards*, which is
-    ///      equivalent to moving "now" forwards — block.timestamp itself cannot be
+    ///      equivalent to moving "now" forwards - block.timestamp itself cannot be
     ///      manipulated on a live network. Affects the funding window while the
     ///      loan is Requested, and the repayment deadline / grace period / interest
     ///      accrual once it is Funded. Restricted to the loan's own participants so
@@ -336,8 +336,8 @@ contract Loan is ReentrancyGuard {
     }
 
     // Real liquidation eligibility. Two independent triggers:
-    //   1. Delinquency — past the repayment deadline plus the grace period.
-    //   2. Collateral shortfall — oracle-priced LTV at or above the liquidation
+    //   1. Delinquency - past the repayment deadline plus the grace period.
+    //   2. Collateral shortfall - oracle-priced LTV at or above the liquidation
     //      threshold (maxLtv + buffer), i.e. an ETH price crash.
     // Replaces the old unconditional markLiquidatedForDemo() bypass.
     //
@@ -454,7 +454,7 @@ contract Loan is ReentrancyGuard {
     }
 
     /// Live LTV in bps: frozen USD debt over current USD collateral value.
-    /// Returns 0 when it cannot be computed (not funded, or no oracle data) —
+    /// Returns 0 when it cannot be computed (not funded, or no oracle data) -
     /// callers must treat 0 as "unknown", not as "perfectly healthy".
     function currentLtvBps() public view returns (uint256) {
         if (status != LoanStatus.Funded || debtValueUsd == 0) return 0;
@@ -480,7 +480,7 @@ contract Loan is ReentrancyGuard {
     // Timestamp up to which interest should accrue: while the loan is Funded,
     // that's "now"; once closed, it's frozen at closedAt so a settled loan's
     // outstanding balance never drifts. Either way, capped at the point the
-    // loan becomes liquidatable — delinquency past that point doesn't inflate
+    // loan becomes liquidatable - delinquency past that point doesn't inflate
     // the debt further, it just means the lenders' recourse is to liquidate.
     function _interestAccrualEnd() internal view returns (uint256) {
         uint256 cap = repaymentDueAt() + GRACE_PERIOD;
@@ -489,7 +489,7 @@ contract Loan is ReentrancyGuard {
     }
 
     // Interest accrues continuously from fundedAt at interestBps, not just over
-    // the fixed durationDays term — a loan repaid early pays less, one repaid
+    // the fixed durationDays term - a loan repaid early pays less, one repaid
     // late pays more (up to the cap above). At elapsedSeconds == durationDays
     // exactly, this is algebraically identical to a fixed-duration calculation.
     //
@@ -497,7 +497,7 @@ contract Loan is ReentrancyGuard {
     // (mulDiv, not compounded per-second), which is already the maximum
     // precision available without a fixed-point interest unit. For a small
     // enough principal * interestBps * elapsedSeconds product (demo-scale
-    // loans checked moments after funding are the practical case — real
+    // loans checked moments after funding are the practical case - real
     // collateral and multi-day durations don't get near this floor), the true
     // interest owed is under 1 wei and floor-divides to exactly 0. This is an
     // accepted MVP limitation, not a bug to chase further: fixing it for real
@@ -509,7 +509,7 @@ contract Loan is ReentrancyGuard {
         return Math.mulDiv(principalAmount, interestBps * elapsedSeconds, 10_000 * 365 days);
     }
 
-    // Live, time-varying figure — the full amount owed as of "now" (or as of
+    // Live, time-varying figure - the full amount owed as of "now" (or as of
     // closedAt for a settled loan). Do not cache; re-query at point of use.
     function totalRepaymentDue() public view returns (uint256) {
         return principalAmount + interestDue();
@@ -527,12 +527,12 @@ contract Loan is ReentrancyGuard {
         return fundedAt + (durationDays * 1 days);
     }
 
-    // Past the deadline but not yet liquidatable — informational for the UI.
+    // Past the deadline but not yet liquidatable - informational for the UI.
     function isDelinquent() public view returns (bool) {
         return status == LoanStatus.Funded && block.timestamp > repaymentDueAt();
     }
 
-    // The exact condition liquidate() enforces — safe for the frontend to poll.
+    // The exact condition liquidate() enforces - safe for the frontend to poll.
     // Use isDelinquentLiquidatable() / isPriceLiquidatable() to tell the user *why*.
     function isLiquidatable() public view returns (bool) {
         return isDelinquentLiquidatable() || isPriceLiquidatable();
