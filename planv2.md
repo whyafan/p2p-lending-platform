@@ -82,12 +82,12 @@ Goal: replace the live wagmi multicall on page load with a proper indexer, and a
 
 These close the remaining gaps versus the literature review. Each is independent; pick per report needs.
 
-- **IPFS-anchored term sheets** - persist the EIP-712 term sheet to IPFS and store hash-only references, instead of Supabase-only off-chain metadata.
-- **Real ML with SHAP + versioning/MLOps** - deploy the FastAPI backend, add SHAP explanations and model versioning, replacing the rule-based path as primary (keep it as fallback).
-- **MockERC20 as an alternative loan asset** - wire the deployed ERC-20 as loan principal instead of native ETH only.
-- **Real `extract_features(wallet_address)` pipeline** - read live from Alchemy/Etherscan instead of synthetic personas.
-- **Decentralized identity / on-chain KYC** - activate `KYCRegistry.sol` in the live flow.
-- **Real KYT** - replace the mock `lib/wallet-screening.ts` with a real Chainalysis/TRM API.
+- **IPFS-anchored term sheets** - DONE 2026-08-21 (hash + CID off-chain in Supabase; on-chain anchoring deferred to a Phase 4 Option B redeploy).
+- **Real ML with SHAP + versioning/MLOps** - DONE 2026-08-21 (Render deploy via render.yaml, content-hash model versioning; rule-based path kept as fallback).
+- **MockERC20 as an alternative loan asset** - DEFERRED: every value path in the pooled Loan.sol is ETH-native; batch with the Phase 4 Option B redeploy.
+- **Real `extract_features(wallet_address)` pipeline** - DONE (already implemented in backend/app/services/chain_fetcher.py via Alchemy mainnet+Sepolia; now actually reachable in production).
+- **Decentralized identity / on-chain KYC** - DEFERRED: enforcing KYCRegistry in createLoan() needs a redeploy; batch with Phase 4 Option B.
+- **Real KYT** - DEFERRED: Chainalysis/TRM APIs are paid; mock stays, still flagged as mock.
 
 ---
 

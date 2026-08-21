@@ -1,6 +1,6 @@
 # NexusFi P2P Lending Platform - Implementation Report
 
-> Generated 2026-07-29 from the live codebase and PLAN.md; last updated 2026-08-21 after Phase 3 (multi-lender pooling) shipped.
+> Generated 2026-07-29 from the live codebase and PLAN.md; last updated 2026-08-21 after Phase 3 (multi-lender pooling) and Phase 6 (ML deployment, model versioning, IPFS term sheets) shipped.
 > This is a status snapshot of what actually runs, not a spec of intent.
 > For the phased plan of remaining work see `planv2.md`; for the reasoning behind the design see `projectknowledge.md`.
 
@@ -91,6 +91,29 @@ All three are populated in `frontend/.env`. Source-verified on Blockscout and So
 - Verified statically: 132/132 tests, `tsc --noEmit` clean, eslint clean.
 Track F manual browser verification (`tests/MANUAL_TEST_PLAN.md`, needs two accounts) is still outstanding.
 
+### Phase 6 - ML deployment, model versioning, IPFS term sheets (shipped 2026-08-21)
+
+- **Credit backend deployable via `render.yaml`** (Render free tier). Wallet-mode scoring now
+  runs the real LightGBM + SHAP pipeline with live Alchemy chain fetching when
+  `CREDIT_BACKEND_URL` is set; the rule-based scorer remains the automatic fallback.
+  Free-tier note: the service sleeps after 15 min idle (~50s wake); the wizard fires a
+  warm-up ping on wallet-mode entry and the fallback copy explains the wake.
+- **Model versioning**: `train.py` stamps `model_meta.json` (version = content hash of the
+  model file); every score response carries `model_version`; migration 006 persists it per
+  loan and the lender safety panel shows which scorer priced the loan.
+- **EIP-712 term-sheet signing + IPFS anchoring**: correction - before Phase 6 no EIP-712
+  signing existed despite earlier claims in this report; the "term sheet" was an unsigned
+  computed object. Wallet-mode borrowers now sign a LoanTermSheet typed message; the signed
+  document is pinned to Pinata, the CID + keccak256 canonical hash persist with the risk
+  assessment, and lenders can fetch, re-hash, and verify the signer from the safety panel.
+  Best-effort: declined signature or failed pin never blocks loan creation. Persona/demo
+  loans do not sign or pin.
+- **Manual setup**: (1) Render Blueprint from `render.yaml` + paste `ALCHEMY_API_KEY`;
+  (2) set `CREDIT_BACKEND_URL` and `PINATA_JWT` on all four Vercel deployments;
+  (3) run migration `006_model_version_and_termsheets.sql` in the Supabase SQL editor.
+- Deferred from Phase 6 (documented in planv2.md): ERC-20 principal and on-chain KYC
+  (batch with a Phase 4 Option B redeploy), real KYT (paid APIs).
+
 ### Multi-lender pooling (Phase 3, shipped 2026-08-21)
 
 Contract change, so this forced a full Sepolia redeploy; the addresses in the table above are the pooled set.
@@ -166,7 +189,9 @@ Phase 2 (peer discovery) is code-complete and pushed as of 2026-08-20; see the "
 - Liquidation is not automatic (a contributor must click; no keeper/bot) - deferred to Phase 4.
 - **Multi-lender pooling - closed 2026-08-21.**
 Shipped as Phase 3; see the section above. Track G manual verification remains open.
-- No IPFS-anchored term sheets, no on-chain event indexer/dashboards, no SHAP/versioned ML - deferred to Phase 5/6.
+- **IPFS-anchored term sheets and SHAP/versioned ML - closed 2026-08-21.**
+Shipped as Phase 6; see the section above.
+No on-chain event indexer/dashboards - still deferred to Phase 5.
 - **Peer discovery - closed 2026-08-20** (was "users find each other by loan ID").
 Directory search and public profile pages shipped as Phase 2; only Track F manual browser verification remains open.
 - **BUG-03** - documented, not fixed.
