@@ -139,6 +139,11 @@ type BackendScoreResult = {
   fallback_used: boolean;
 };
 
+// Knock on the scoring backend so Render starts waking while the user fills the form.
+function warmUpCreditBackend() {
+  void fetch('/api/credit/score', { method: 'GET' }).catch(() => {});
+}
+
 function ScoreGauge({ score, tier }: { score: number; tier: string }) {
   const pct = ((score + 1) / 2) * 100;
   const color = score >= 0.4 ? '#10b981' : score >= 0 ? '#f59e0b' : '#ef4444';
@@ -599,7 +604,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
       const data = await res.json() as Record<string, unknown>;
       if (data.fallback) {
         setBackendUnavailable(true);
-        setScoringWarnings(['Real-wallet scoring is temporarily unavailable — the credit-scoring service isn\'t reachable right now.']);
+        setScoringWarnings(['Real-wallet scoring is temporarily unavailable. The service may be waking up (it sleeps when idle) - try again in about a minute, or switch to demo mode below.']);
       } else if (res.ok) {
         const result = data as unknown as BackendScoreResult;
         setBackendResult(result);
@@ -622,6 +627,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   // Switch between persona and wallet mode (can be called from any step)
   function switchMode() {
     const nextMode: EvalMode = evalMode === 'persona' ? 'wallet' : 'persona';
+    if (nextMode === 'wallet') warmUpCreditBackend();
     setEvalMode(nextMode);
     setSelectedPersona(null);
     setRiskExpl(null);
@@ -684,6 +690,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   }
 
   function startWalletMode() {
+    warmUpCreditBackend();
     setEvalMode('wallet');
     setWizardStep(1);
   }
