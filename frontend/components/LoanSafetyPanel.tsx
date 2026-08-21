@@ -120,7 +120,7 @@ export function LoanSafetyPanel({
       }
     } catch {
       setVerifyState('error');
-      setVerifyDetail('Could not fetch the term sheet from the IPFS gateway. Try again in a moment.');
+      setVerifyDetail('Could not fetch or verify the term sheet from the IPFS gateway. Try again in a moment.');
     }
   }
 

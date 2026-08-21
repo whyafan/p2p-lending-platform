@@ -44,7 +44,7 @@ export function serializeMessage(m: TermSheetMessage): Record<string, string> {
   };
 }
 
-/** Inverse of serializeMessage; throws on malformed input (verification treats that as a mismatch). */
+/** Inverse of serializeMessage; throws on malformed input (callers surface that as a verification error). */
 export function parseMessage(raw: Record<string, unknown>): TermSheetMessage {
   const borrower = raw.borrower;
   if (typeof borrower !== 'string' || !/^0x[a-fA-F0-9]{40}$/.test(borrower)) {
