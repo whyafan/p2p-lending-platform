@@ -137,6 +137,7 @@ type BackendScoreResult = {
   }>;
   warnings: string[];
   fallback_used: boolean;
+  model_version?: string | null;
 };
 
 // Knock on the scoring backend so Render starts waking while the user fills the form.
@@ -497,9 +498,10 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
         contributions: riskExpl.contributions,
         source: evalMode === 'persona' ? 'persona' : 'wallet',
         personaId: selectedPersona?.id ?? null,
+        modelVersion: evalMode === 'wallet' ? (backendResult?.model_version ?? null) : null,
       }),
     }).catch((err) => console.error('[risk-persist]', err));
-  }, [createdLoanContract, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona]);
+  }, [createdLoanContract, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona, backendResult]);
 
   // "What happens next" used to be a static list with `done` hardcoded, so it
   // never moved past step 1 no matter what happened on-chain. Follow the real

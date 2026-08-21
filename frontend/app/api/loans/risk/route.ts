@@ -43,6 +43,9 @@ export async function POST(req: Request) {
     contributions,
     source,
     personaId,
+    modelVersion,
+    termSheetCid,
+    termSheetHash,
   } = (body ?? {}) as Record<string, unknown>;
 
   if (typeof loanContract !== 'string' || !ADDRESS_RE.test(loanContract)) {
@@ -74,6 +77,9 @@ export async function POST(req: Request) {
     contributions,
     source: typeof source === 'string' ? source : null,
     persona_id: typeof personaId === 'string' ? personaId : null,
+    model_version: typeof modelVersion === 'string' ? modelVersion : null,
+    term_sheet_cid: typeof termSheetCid === 'string' ? termSheetCid : null,
+    term_sheet_hash: typeof termSheetHash === 'string' ? termSheetHash : null,
     created_by: session.profile.id,
   });
 
@@ -108,7 +114,7 @@ export async function GET(req: Request) {
   if (params.get('latest')) {
     const { data, error } = await client0
       .from('loan_risk_assessments')
-      .select('loan_contract, tier, overall_score, contributions, source, persona_id, created_at')
+      .select('loan_contract, tier, overall_score, contributions, source, persona_id, created_at, model_version, term_sheet_cid, term_sheet_hash')
       .eq('created_by', session.profile.id)
       .order('created_at', { ascending: false })
       .limit(1);
@@ -128,6 +134,9 @@ export async function GET(req: Request) {
             source: row.source,
             personaId: row.persona_id,
             createdAt: row.created_at,
+            modelVersion: row.model_version ?? null,
+            termSheetCid: row.term_sheet_cid ?? null,
+            termSheetHash: row.term_sheet_hash ?? null,
           }
         : null,
     });
@@ -150,7 +159,7 @@ export async function GET(req: Request) {
 
   const { data, error } = await client0
     .from('loan_risk_assessments')
-    .select('loan_contract, tier, overall_score, contributions, source, persona_id, created_at')
+    .select('loan_contract, tier, overall_score, contributions, source, persona_id, created_at, model_version, term_sheet_cid, term_sheet_hash')
     .in('loan_contract', addresses);
 
   if (error) {
@@ -168,6 +177,9 @@ export async function GET(req: Request) {
       source: row.source,
       personaId: row.persona_id,
       createdAt: row.created_at,
+      modelVersion: row.model_version ?? null,
+      termSheetCid: row.term_sheet_cid ?? null,
+      termSheetHash: row.term_sheet_hash ?? null,
     };
   }
 

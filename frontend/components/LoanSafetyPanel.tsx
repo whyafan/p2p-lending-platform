@@ -50,6 +50,9 @@ type Props = {
     contributions: FeatureContribution[];
     source?: string | null;
     personaId?: string | null;
+    modelVersion?: string | null;
+    termSheetCid?: string | null;
+    termSheetHash?: string | null;
   } | null;
 };
 
@@ -249,6 +252,12 @@ export function LoanSafetyPanel({
                   <span className="text-slate-700"> / 1.000</span>
                 </p>
               </div>
+
+              <p className="text-[10px] text-slate-500">
+                {assessment.modelVersion
+                  ? <>Scored by ML model <span className="font-mono text-slate-400">{assessment.modelVersion}</span> (LightGBM + SHAP)</>
+                  : <>Scored by the rule-based explainable scorer</>}
+              </p>
 
               <div className="space-y-1">
                 {[...assessment.contributions]
