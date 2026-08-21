@@ -14,6 +14,7 @@ import { useAccount, useReadContract, useReadContracts } from 'wagmi';
 import { sepolia } from 'wagmi/chains';
 import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
 import { useLoanEvents } from '../hooks/useLoanEvents';
+import { distinctShareActors } from '../lib/share-math';
 import {
   generatePnl,
   generateTaxPnl,
@@ -191,8 +192,8 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
         interestBps: Number(t.interestBps),
         durationDays: Number(t.durationDays),
         statusVal,
-        // Pooled loans have many lenders, not one counterparty; a presentational
-        // stopgap until Task 8 shows the pool properly.
+        // Pooled loans have many lenders, not one counterparty; refined to an
+        // actual lender count below once this loan's events are indexed.
         counterparty: role === 'borrower' ? 'pooled' : t.borrower,
         createdAt: Number(t.createdAt),
       });
@@ -218,18 +219,25 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
   // had no activity at all in the window — a statement for a period shouldn't
   // list loans that did nothing during it.
   const statementLoans: StatementLoan[] = useMemo(() => {
-    const withEvents = myLoans.map((l) => ({
-      ...l,
-      events: (byLoan.get(l.loanContract.toLowerCase()) ?? []).filter((e) => {
+    const withEvents = myLoans.map((l) => {
+      const events = (byLoan.get(l.loanContract.toLowerCase()) ?? []).filter((e) => {
         if (e.timestamp === undefined) return true; // don't silently drop unknowns
         if (range.from !== undefined && e.timestamp < range.from) return false;
         if (range.to !== undefined && e.timestamp > range.to) return false;
         return true;
-      }),
-    }));
+      });
+      // Replace the 'pooled' placeholder with an actual lender count, when
+      // this loan's ShareDistributed events have been indexed.
+      let counterparty = l.counterparty;
+      if (role === 'borrower') {
+        const n = distinctShareActors(events).length;
+        counterparty = n > 0 ? `${n} lender${n === 1 ? '' : 's'}` : l.counterparty;
+      }
+      return { ...l, events, counterparty };
+    });
     if (range.from === undefined && range.to === undefined) return withEvents;
     return withEvents.filter((l) => l.events.length > 0);
-  }, [myLoans, byLoan, range]);
+  }, [myLoans, byLoan, range, role]);
 
   function download(kind: 'pnl' | 'tax' | 'tradebook') {
     setBusy(kind);

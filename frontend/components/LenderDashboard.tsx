@@ -1768,6 +1768,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                           events={eventsByLoan.get(terms.loanContract.toLowerCase()) ?? []}
                           statusVal={statusVal ?? 2}
                           priceFor={priceFor}
+                          viewerAddress={address}
+                          myContribution={myContribution}
                         />
                       </div>
                     </div>

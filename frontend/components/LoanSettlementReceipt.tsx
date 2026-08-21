@@ -12,6 +12,14 @@
 import { formatEther } from 'viem';
 import { EVENT_LABEL, type LoanEvent } from '../lib/loan-events';
 import { formatUsd } from '../lib/format';
+import {
+  hasShareData,
+  myShareEvents,
+  OUTBOUND_KINDS,
+  splitSharesByLiquidation,
+  sumAmounts,
+  unclaimedPendingShares,
+} from '../lib/share-math';
 import { ArrowDownLeft, ArrowUpRight, ExternalLink, Receipt } from 'lucide-react';
 
 type Props = {
@@ -26,6 +34,10 @@ type Props = {
   /** Values an event in USD, using its price snapshot where available. */
   priceFor: (e: LoanEvent) => { usd: number; estimated: boolean };
   explorerBase?: string;
+  /** The connected wallet, lowercased or not - used to pick this lender's own ShareDistributed events out of the pool. */
+  viewerAddress?: string;
+  /** This lender's own contribution, when known - falls back to `principal` (single-lender assumption). */
+  myContribution?: bigint;
 };
 
 const eth = (w: bigint) => parseFloat(formatEther(w)).toFixed(6);
@@ -38,6 +50,8 @@ export function LoanSettlementReceipt({
   statusVal,
   priceFor,
   explorerBase = 'https://sepolia.etherscan.io',
+  viewerAddress,
+  myContribution,
 }: Props) {
   const liquidated = statusVal === 4;
   const zero = BigInt(0);
@@ -52,9 +66,35 @@ export function LoanSettlementReceipt({
   const seized = liqEvent?.amount ?? zero;
   const refunded = liqEvent?.refunded ?? zero;
 
-  // Lender: everything that came back vs. the principal they put in.
-  const lenderReceived = totalRepaid + seized;
-  const lenderPnl = lenderReceived - principal;
+  // Per-share gate: only lenders on a pooled loan that has actually been
+  // indexed with ShareDistributed events get their own numbers. Everything
+  // else (borrowers, or a loan with zero share-distributed events - old-loan
+  // data or an index that hasn't caught up yet) falls back to the loan-level
+  // totals computed above, unchanged.
+  const usePerShare = role === 'lender' && Boolean(viewerAddress) && hasShareData(events);
+
+  let myLent: bigint;
+  let myRepaidShare: bigint;
+  let mySeized: bigint;
+  let myReceived: bigint;
+  let pendingUnclaimed: bigint;
+
+  if (usePerShare) {
+    const mine = myShareEvents(events, viewerAddress as string);
+    const { seizureShares, repaymentShares } = splitSharesByLiquidation(mine, liqEvent?.txHash);
+    myLent = myContribution ?? principal;
+    myRepaidShare = sumAmounts(repaymentShares);
+    mySeized = sumAmounts(seizureShares);
+    myReceived = myRepaidShare + mySeized; // includes pending shares - still owed either way
+    pendingUnclaimed = unclaimedPendingShares(events, viewerAddress as string);
+  } else {
+    myLent = principal;
+    myRepaidShare = totalRepaid;
+    mySeized = seized;
+    myReceived = totalRepaid + seized;
+    pendingUnclaimed = zero;
+  }
+  const lenderPnl = myReceived - myLent;
 
   // Borrower: they received the principal, paid back repayments, and either got
   // collateral released (repaid) or partially refunded (liquidated).
@@ -71,10 +111,10 @@ export function LoanSettlementReceipt({
   const rows =
     role === 'lender'
       ? [
-          { label: 'You lent', value: `${eth(principal)} ETH`, tone: 'out' as const },
-          { label: 'Repayments received', value: `${eth(totalRepaid)} ETH`, tone: 'in' as const },
+          { label: 'You lent', value: `${eth(myLent)} ETH`, tone: 'out' as const },
+          { label: 'Repayments received', value: `${eth(myRepaidShare)} ETH`, tone: 'in' as const },
           ...(liquidated
-            ? [{ label: 'Collateral seized', value: `${eth(seized)} ETH`, tone: 'in' as const }]
+            ? [{ label: 'Collateral seized', value: `${eth(mySeized)} ETH`, tone: 'in' as const }]
             : []),
           {
             label: lenderPnl >= zero ? 'Interest earned' : 'Shortfall',
@@ -140,6 +180,13 @@ export function LoanSettlementReceipt({
         ))}
       </div>
 
+      {role === 'lender' && pendingUnclaimed > zero && (
+        <p className="text-[10px] text-amber-400/80">
+          Includes {eth(pendingUnclaimed)} ETH claimable via Claim - a push delivery failed, so
+          it&apos;s owed to you but still sitting in the contract.
+        </p>
+      )}
+
       {/* per-leg audit trail — the part MetaMask can't give you */}
       <div className="border-t border-slate-800/60 pt-2 space-y-1">
         <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-1">
@@ -151,10 +198,7 @@ export function LoanSettlementReceipt({
           </p>
         ) : (
           events.map((e) => {
-            const inbound =
-              role === 'lender'
-                ? e.kind !== 'funded'
-                : e.kind === 'funded';
+            const inbound = !OUTBOUND_KINDS[role].includes(e.kind);
             const usd = usdOf(e.amount, e);
             return (
               <div
