@@ -1114,8 +1114,10 @@ git commit -m "docs: Phase 6 off-chain shipped - report, plan status, env exampl
 
 ## Post-plan manual steps (user, not the implementer)
 
-1. Render: New → Blueprint → this repo, branch `atharva`; paste `ALCHEMY_API_KEY`.
-2. Vercel ×4: set `CREDIT_BACKEND_URL=https://<service>.onrender.com` and `PINATA_JWT`.
-3. Pinata: create account + JWT.
-4. Supabase SQL editor: run `006_model_version_and_termsheets.sql`.
+1. Supabase SQL editor: run `006_model_version_and_termsheets.sql` FIRST, before deploying
+   the new frontend - the risk route selects these columns unconditionally, so a
+   pre-migration schema 500s on every risk-assessment read and write, not just the new fields.
+2. Render: New → Blueprint → this repo, branch `atharva`; paste `ALCHEMY_API_KEY`.
+3. Vercel ×4: set `CREDIT_BACKEND_URL=https://<service>.onrender.com` and `PINATA_JWT`.
+4. Pinata: create account + JWT.
 5. Live smoke test: wallet-mode loan on a deployed frontend → SHAP contributions + model version visible to a lender; Verify button confirms the pinned term sheet.

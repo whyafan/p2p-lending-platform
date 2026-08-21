@@ -108,9 +108,14 @@ Track F manual browser verification (`tests/MANUAL_TEST_PLAN.md`, needs two acco
   assessment, and lenders can fetch, re-hash, and verify the signer from the safety panel.
   Best-effort: declined signature or failed pin never blocks loan creation. Persona/demo
   loans do not sign or pin.
-- **Manual setup**: (1) Render Blueprint from `render.yaml` + paste `ALCHEMY_API_KEY`;
-  (2) set `CREDIT_BACKEND_URL` and `PINATA_JWT` on all four Vercel deployments;
-  (3) run migration `006_model_version_and_termsheets.sql` in the Supabase SQL editor.
+  Verification proves the borrower signed a term sheet matching this loan's on-chain terms;
+  because signing happens before the loan contract exists, the CID-to-loan binding itself
+  lives in the off-chain assessment row, not on-chain.
+- **Manual setup**: (1) run migration `006_model_version_and_termsheets.sql` in the Supabase
+  SQL editor - this must happen BEFORE deploying the new frontend, since the risk route
+  selects these columns unconditionally and a pre-migration schema 500s on every read/write;
+  (2) Render Blueprint from `render.yaml` + paste `ALCHEMY_API_KEY`;
+  (3) set `CREDIT_BACKEND_URL` and `PINATA_JWT` on all four Vercel deployments.
 - Deferred from Phase 6 (documented in planv2.md): ERC-20 principal and on-chain KYC
   (batch with a Phase 4 Option B redeploy), real KYT (paid APIs).
 
@@ -178,7 +183,7 @@ Guarded by `lib/query-defaults.test.ts` so the config can't silently regress.
 - **B1** - closed.
 Root cause: real-wallet scoring depends entirely on the optional FastAPI credit-scoring backend (`backend/`), which is not deployed alongside the app (`CREDIT_BACKEND_URL` defaults to `localhost:8000` and is unconfigured everywhere) - so for any real visitor on the live deployment, wallet-mode scoring failed 100% of the time while persona mode (fully client-side) always worked.
 Fixed the degrade path: the wallet wizard now clearly explains the service is unavailable and offers a one-click switch to demo/persona mode instead of leaving the user stuck; see `components/LoanRequestPanel.tsx`.
-Deploying the backend itself remains Phase 6 scope.
+The backend deploy shipped in Phase 6; see the Phase 6 section above.
 - **B2** - closed.
 `ethChange24h` in `app/app/page.tsx` looked up `marketData['ethereum']`, but the API keys `marketData` by symbol (`'ETH'`), so the 24h change never rendered and the widget looked static even though the price itself refetches every 30s.
 Final merged state (2026-08-03): a teammate independently built a dedicated `EthPriceTicker.tsx` component (directional flash colors, staleness counter); the merge kept their component and ported the `'ETH'` key fix into it, since their version had the same broken lookup.
