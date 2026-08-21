@@ -100,7 +100,7 @@ describe("Multi-lender repayment settlement", async function () {
   });
 
   it("three lenders: distributed shares sum exactly to the applied amount", async function () {
-    const { loan } = await deployRequestedLoan();
+    const { loan, loanAddress } = await deployRequestedLoan();
     await loan.write.contribute({ account: lenderA.account, value: parseEther("0.5") });
     await loan.write.contribute({ account: lenderB.account, value: parseEther("0.3") });
     await loan.write.contribute({ account: lenderC.account, value: parseEther("0.2") });
@@ -135,6 +135,10 @@ describe("Multi-lender repayment settlement", async function () {
     // for C's own 20% share would differ from what C actually received.
     const naiveCShare = (installment * parseEther("0.2")) / parseEther("1");
     assert.notEqual(cShare, naiveCShare);
+    // Independent guards: this is a partial payment, so the loan stays Funded,
+    // and a fully-pushed distribution must leave no wei stranded on the contract.
+    assert.equal(await loan.read.status(), 1); // Funded
+    assert.equal(await publicClient.getBalance({ address: loanAddress }), 0n);
   });
 
   it("a reverting contract lender is credited, not able to block repayment", async function () {
@@ -142,16 +146,39 @@ describe("Multi-lender repayment settlement", async function () {
     const rejecting = await viem.deployContract("RejectingReceiver", [], {
       client: { wallet: deployer, public: publicClient },
     });
+    // rejecting contributes first, so it is _lenders[0], NOT the last lender:
+    // its share is an exact floor, with no dust, independently computable.
     await rejecting.write.contributeTo([loanAddress], { account: deployer.account, value: parseEther("0.4") });
     await loan.write.contribute({ account: lenderA.account, value: parseEther("0.6") });
+
+    const aBefore = await publicClient.getBalance({ address: lenderA.account.address });
 
     // accept stays false: pushes to it revert, so its share must be credited.
     const roughlyOwed = await loan.read.outstandingBalance();
     await loan.write.repay({ account: borrower.account, value: roughlyOwed + parseEther("0.1") });
 
     assert.equal(await loan.read.status(), 2); // repayment was NOT blocked
+
+    // Independently compute the expected share instead of trusting the
+    // contract's own recorded value: read the authoritative applied amount
+    // after the fact (time-sensitive interest) and floor it against
+    // rejecting's known 0.4 ETH contribution out of the 1 ETH principal.
+    const applied = await loan.read.amountRepaid();
+    const expectedShare = (applied * parseEther("0.4")) / parseEther("1");
+
     const credited = await loan.read.pendingWithdrawals([rejecting.address]);
     assert.ok(credited > 0n, "failed push must be credited for withdrawal");
+    assert.equal(credited, expectedShare, "credited amount must equal the independently computed exact floor");
+
+    // The well-behaved EOA co-lender (lenderA, last in the array) must still
+    // be paid its full share by push in the same transaction, despite
+    // rejecting's push failing: its delta is exactly applied - credited.
+    const aAfter = await publicClient.getBalance({ address: lenderA.account.address });
+    assert.equal(aAfter - aBefore, applied - credited);
+
+    // Before withdrawal, the loan contract holds exactly the failed share and
+    // nothing more: lenderA's share was already pushed out.
+    assert.equal(await publicClient.getBalance({ address: loanAddress }), credited);
 
     // Arm the receiver, withdraw, and verify the credit pays out in full.
     await rejecting.write.setAccept([true], { account: deployer.account });
@@ -224,7 +251,7 @@ describe("Multi-lender repayment settlement", async function () {
 
     console.log(`10-lender repay gasUsed: ${receipt.gasUsed}`);
     assert.ok(
-      receipt.gasUsed < 2_000_000n,
+      receipt.gasUsed < 450_000n,
       `distribution across the full 10-lender cap must stay well under a safe bound, got ${receipt.gasUsed}`,
     );
     assert.equal(await loan.read.status(), 2); // Repaid
