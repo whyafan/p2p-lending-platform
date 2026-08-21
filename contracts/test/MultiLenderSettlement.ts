@@ -415,8 +415,14 @@ describe("Multi-lender repayment settlement", async function () {
 
   it("rejects plain ETH transfers from anyone but the vault", async function () {
     const { loanAddress } = await deployRequestedLoan();
-    await assert.rejects(
+    // Assert the revert REASON, not merely that the promise rejected. A bare
+    // assert.rejects is satisfied by any client-layer failure (parameter
+    // validation, nonce, chain misconfiguration) without the EVM ever reaching
+    // receive(), which would leave this test permanently green while proving
+    // nothing about the sender gate.
+    await viem.assertions.revertWith(
       lenderA.sendTransaction({ to: loanAddress, value: parseEther("0.1") }),
+      "Loan: direct transfers not accepted",
     );
   });
 
