@@ -7,7 +7,6 @@ import {
   useWriteContract,
   useWaitForTransactionReceipt,
   useAccount,
-  useConnections,
   useSwitchChain,
 } from 'wagmi';
 import { formatEther } from 'viem';
@@ -101,12 +100,6 @@ type Props = {
 
 export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testnet' }: Props) {
   const { address } = useAccount();
-  const connections = useConnections();
-  // All accounts the user has authorized for this dapp across every connected wallet
-  const allAddresses = useMemo(
-    () => connections.flatMap((c) => c.accounts).map((a) => a.toLowerCase()),
-    [connections],
-  );
   const { switchChainAsync } = useSwitchChain();
   const [activeTab, setActiveTab] = useState<'open' | 'positions'>('open');
   const [fundingLoanId, setFundingLoanId] = useState<bigint | null>(null);
@@ -175,17 +168,26 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     [loanContractAddresses, chainId],
   );
 
+  // Narrowing (deliberate): the pooled contract's contributions() takes one
+  // address, so we query only the ACTIVE connected account (`address`), not
+  // every account across every connected wallet (as the old single-lender
+  // `lender()` comparison did). Querying per connected account would multiply
+  // this read round by the number of accounts, so positions shown here follow
+  // the active account only, not the full multi-wallet breadth.
   const lenderContracts = useMemo(
     () =>
-      loanContractAddresses
-        .filter((a): a is `0x${string}` => Boolean(a))
-        .map((addr) => ({
-          address: addr,
-          abi: LOAN_ABI,
-          functionName: 'lender' as const,
-          chainId,
-        })),
-    [loanContractAddresses, chainId],
+      address
+        ? loanContractAddresses
+            .filter((a): a is `0x${string}` => Boolean(a))
+            .map((addr) => ({
+              address: addr,
+              abi: LOAN_ABI,
+              functionName: 'contributions' as const,
+              args: [address] as const,
+              chainId,
+            }))
+        : [],
+    [loanContractAddresses, chainId, address],
   );
 
   const { data: statusResults, refetch: refetchStatus } = useReadContracts({
@@ -353,11 +355,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     return map;
   }, [statusContracts, statusResults]);
 
-  const lenderByAddress = useMemo(() => {
-    const map = new Map<string, `0x${string}`>();
+  const myContributionByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
     lenderContracts.forEach((c, i) => {
       const r = lenderResults?.[i];
-      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as `0x${string}`);
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
     });
     return map;
   }, [lenderContracts, lenderResults]);
@@ -471,7 +473,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
         termsResult?.status === 'success' ? (termsResult.result as LoanTermsTuple) : null;
       const loanAddr = terms?.loanContract?.toLowerCase();
       const statusVal = loanAddr !== undefined ? statusByAddress.get(loanAddr) : undefined;
-      const lenderAddr = loanAddr !== undefined ? lenderByAddress.get(loanAddr) : undefined;
+      const myContribution = loanAddr !== undefined ? myContributionByAddress.get(loanAddr) : undefined;
       const isLiquidatableVal = loanAddr !== undefined ? isLiquidatableByAddress.get(loanAddr) : undefined;
       const repaymentDueAtVal = loanAddr !== undefined ? repaymentDueAtByAddress.get(loanAddr) : undefined;
       const ltvBpsVal = loanAddr !== undefined ? ltvByAddress.get(loanAddr) : undefined;
@@ -481,12 +483,12 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const outstandingVal = loanAddr !== undefined ? outstandingByAddress.get(loanAddr) : undefined;
       const priceAtFundingVal = loanAddr !== undefined ? priceAtFundingByAddress.get(loanAddr) : undefined;
       return {
-        id, terms, statusVal, lenderAddr, isLiquidatableVal, repaymentDueAtVal,
+        id, terms, statusVal, myContribution, isLiquidatableVal, repaymentDueAtVal,
         ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal,
       };
     });
   }, [
-    loanIds, termsResults, statusByAddress, lenderByAddress, isLiquidatableByAddress,
+    loanIds, termsResults, statusByAddress, myContributionByAddress, isLiquidatableByAddress,
     repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress, previewByAddress, outstandingByAddress, priceAtFundingByAddress,
   ]);
 
@@ -517,31 +519,22 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     [loans],
   );
 
-  const isMine = (lenderAddr: string | undefined) =>
-    lenderAddr !== undefined &&
-    (allAddresses.length > 0
-      ? allAddresses.includes(lenderAddr.toLowerCase())
-      : lenderAddr.toLowerCase() === address?.toLowerCase());
+  // Position ownership now follows contributions(activeAddress) > 0, so it
+  // only reflects the active connected account (see the narrowing comment on
+  // lenderContracts above), not every account in allAddresses.
+  const isMine = (contribution: bigint | undefined) => (contribution ?? 0n) > 0n;
 
   // Settled loans (Repaid / Liquidated) the user funded. Previously these were
   // filtered out entirely, so the moment a borrower repaid, the lender's position
   // vanished with no trace that it had ever existed or been paid back.
   const settledPositions = useMemo(
-    () => loans.filter((l) => (l.statusVal === 2 || l.statusVal === 4) && isMine(l.lenderAddr)),
-    [loans, allAddresses, address], // eslint-disable-line react-hooks/exhaustive-deps
+    () => loans.filter((l) => (l.statusVal === 2 || l.statusVal === 4) && isMine(l.myContribution)),
+    [loans],
   );
 
   const myPositions = useMemo(
-    () =>
-      loans.filter(
-        (l) =>
-          l.statusVal === 1 &&
-          l.lenderAddr !== undefined &&
-          (allAddresses.length > 0
-            ? allAddresses.includes(l.lenderAddr.toLowerCase())
-            : l.lenderAddr.toLowerCase() === address?.toLowerCase()),
-      ),
-    [loans, allAddresses, address],
+    () => loans.filter((l) => l.statusVal === 1 && isMine(l.myContribution)),
+    [loans],
   );
 
   async function fundLoan(loanContractAddr: `0x${string}`, principalWei: bigint, loanId: bigint) {
@@ -554,7 +547,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const hash = await writeContractAsync({
         address: loanContractAddr,
         abi: LOAN_ABI,
-        functionName: 'fund',
+        functionName: 'contribute',
         value: principalWei,
         chainId,
       });

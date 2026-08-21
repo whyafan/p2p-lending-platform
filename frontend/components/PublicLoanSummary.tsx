@@ -9,7 +9,7 @@ import { formatUsd, formatPercent } from '../lib/format';
 const POLL_MS = 5_000;
 
 // Mirrors LenderDashboard.tsx's FUNDING_WINDOW_SECS/isExpired: a Requested
-// loan whose funding window has passed will never actually fund (fund()
+// loan whose funding window has passed will never actually fund (contribute()
 // reverts on-chain), but nothing moves its status off Requested, so it has
 // to be filtered out client-side the same way LenderDashboard does.
 const FUNDING_WINDOW_SECS = 7 * 24 * 60 * 60;
@@ -47,9 +47,11 @@ type Props = {
  * own loans, never someone else's.
  *
  * Mirrors the multi-round read pattern those two components already use
- * (getLoanIds -> loans(id) -> status/lender per contract, joined back by
- * address so the result-array indices can never drift from loanIds), just
- * parameterized by an arbitrary target address instead of useAccount().
+ * (getLoanIds -> loans(id) -> status/contributions per contract, joined back
+ * by address so the result-array indices can never drift from loanIds), just
+ * parameterized by an arbitrary target address instead of useAccount(). Since
+ * targetAddress is fixed per render (not the connected wallet), it queries
+ * contributions(targetAddress) directly - no active-account narrowing needed.
  */
 export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId, ethPrice }: Props) {
   const isDeployed = Boolean(
@@ -103,8 +105,14 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
     () =>
       loanContractAddresses
         .filter((a): a is `0x${string}` => Boolean(a))
-        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'lender' as const, chainId })),
-    [loanContractAddresses, chainId],
+        .map((addr) => ({
+          address: addr,
+          abi: LOAN_ABI,
+          functionName: 'contributions' as const,
+          args: [targetAddress] as const,
+          chainId,
+        })),
+    [loanContractAddresses, chainId, targetAddress],
   );
 
   const { data: statusResults } = useReadContracts({
@@ -129,10 +137,10 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
   }, [statusContracts, statusResults]);
 
   const lenderByAddress = useMemo(() => {
-    const map = new Map<string, `0x${string}`>();
+    const map = new Map<string, bigint>();
     lenderContracts.forEach((c, i) => {
       const r = lenderResults?.[i];
-      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as `0x${string}`);
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
     });
     return map;
   }, [lenderContracts, lenderResults]);
@@ -151,8 +159,8 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
           if (terms.borrower.toLowerCase() !== targetAddress.toLowerCase()) return null;
           if (isExpired(terms.createdAt)) return null;
         } else {
-          const lenderAddr = lenderByAddress.get(addrKey);
-          if (lenderAddr?.toLowerCase() !== targetAddress.toLowerCase()) return null;
+          const contribution = lenderByAddress.get(addrKey);
+          if (!contribution || contribution <= 0n) return null;
         }
         return { id, terms };
       })

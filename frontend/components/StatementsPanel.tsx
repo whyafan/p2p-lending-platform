@@ -140,9 +140,21 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
     () => allAddresses.map((a) => ({ address: a, abi: LOAN_ABI, functionName: 'status' as const, chainId })),
     [allAddresses, chainId],
   );
+  // Narrowing (deliberate, same as LenderDashboard): contributions() takes one
+  // address, so this queries only the active connected account, not every
+  // account across every connected wallet.
   const lenderContracts = useMemo(
-    () => allAddresses.map((a) => ({ address: a, abi: LOAN_ABI, functionName: 'lender' as const, chainId })),
-    [allAddresses, chainId],
+    () =>
+      address
+        ? allAddresses.map((a) => ({
+            address: a,
+            abi: LOAN_ABI,
+            functionName: 'contributions' as const,
+            args: [address] as const,
+            chainId,
+          }))
+        : [],
+    [allAddresses, chainId, address],
   );
   const { data: statusRes } = useReadContracts({
     contracts: statusContracts,
@@ -164,11 +176,11 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
       const t = r.result as LoanTermsTuple;
       const idx = allAddresses.indexOf(t.loanContract);
       const statusVal = idx >= 0 && statusRes?.[idx]?.status === 'success' ? Number(statusRes[idx].result) : 0;
-      const lenderAddr =
-        idx >= 0 && lenderRes?.[idx]?.status === 'success' ? (lenderRes[idx].result as string) : undefined;
+      const contribution =
+        idx >= 0 && lenderRes?.[idx]?.status === 'success' ? (lenderRes[idx].result as bigint) : undefined;
 
       const mine =
-        role === 'borrower' ? t.borrower.toLowerCase() === me : lenderAddr?.toLowerCase() === me;
+        role === 'borrower' ? t.borrower.toLowerCase() === me : (contribution ?? 0n) > 0n;
       if (!mine) return;
 
       out.push({
@@ -179,7 +191,9 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
         interestBps: Number(t.interestBps),
         durationDays: Number(t.durationDays),
         statusVal,
-        counterparty: role === 'borrower' ? lenderAddr : t.borrower,
+        // Pooled loans have many lenders, not one counterparty; a presentational
+        // stopgap until Task 8 shows the pool properly.
+        counterparty: role === 'borrower' ? 'pooled' : t.borrower,
         createdAt: Number(t.createdAt),
       });
     });
