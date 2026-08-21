@@ -742,7 +742,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
               <div className="hidden md:grid grid-cols-[2fr_1.2fr_1.2fr_1fr_1fr_auto] gap-3 px-5 text-[10px] font-bold text-slate-600 uppercase tracking-widest">
                 <span>Borrower / Tier</span>
                 <span>Principal</span>
-                <span>You earn</span>
+                <span>Total interest</span>
                 <span>Duration</span>
                 <span>Current LTV</span>
                 <span>Funded</span>
@@ -787,6 +787,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                   const v = (remainingWei * 50n) / 100n;
                   return v > minWei ? v : minWei;
                 })();
+                // Only true when the remaining gap is smaller than the minimum,
+                // meaning the Remaining quick-fill necessarily offers more than
+                // what's actually left (the contract floors at minWei and
+                // refunds the surplus) - the one case worth calling out.
+                const isNearFullEdgeCase = remainingWei > 0n && remainingWei < minWei;
                 const idKey = id.toString();
                 const contributionInput = contributionInputs[idKey] ?? formatEther(remainingOrMinWei);
 
@@ -984,7 +989,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                               onClick={() =>
                                 setContributionInputs((prev) => ({ ...prev, [idKey]: formatEther(quickFill25Wei) }))
                               }
-                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap"
+                              disabled={isTxInFlight}
+                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               25%
                             </button>
@@ -993,7 +999,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                               onClick={() =>
                                 setContributionInputs((prev) => ({ ...prev, [idKey]: formatEther(quickFill50Wei) }))
                               }
-                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap"
+                              disabled={isTxInFlight}
+                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               50%
                             </button>
@@ -1002,7 +1009,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                               onClick={() =>
                                 setContributionInputs((prev) => ({ ...prev, [idKey]: formatEther(remainingOrMinWei) }))
                               }
-                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap"
+                              disabled={isTxInFlight}
+                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               Remaining
                             </button>
@@ -1022,17 +1030,26 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                               {isTxInFlight ? (
                                 <>
                                   <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
-                                  {isFunding && isFundConfirming ? 'Confirming…' : 'Confirm…'}
+                                  {isFundConfirming ? 'Confirming…' : 'Confirm…'}
                                 </>
                               ) : (
                                 'Contribute'
                               )}
                             </button>
                           </div>
-                          <p className="text-[10px] text-slate-700 mt-1.5">
-                            Minimum contribution: <span className="font-mono text-slate-500">{formatEther(minWei)} ETH</span>.
-                            {' '}Sending more than what is left is fine, the contract only takes what is needed and refunds the rest.
-                          </p>
+                          {isNearFullEdgeCase ? (
+                            <p className="text-[10px] text-amber-400/90 mt-1.5 rounded-lg border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5">
+                              Only <span className="font-mono">{formatEther(remainingWei)} ETH</span> is left to fund this loan, but the minimum contribution is{' '}
+                              <span className="font-mono">{formatEther(minWei)} ETH</span>. The Remaining button offers{' '}
+                              <span className="font-mono">{formatEther(remainingOrMinWei)} ETH</span> - the extra{' '}
+                              <span className="font-mono">{formatEther(minWei - remainingWei)} ETH</span> comes back automatically.
+                            </p>
+                          ) : (
+                            <p className="text-[10px] text-slate-700 mt-1.5">
+                              Minimum contribution: <span className="font-mono text-slate-500">{formatEther(minWei)} ETH</span>.
+                              {' '}Sending more than what is left is fine, the contract only takes what is needed and refunds the rest.
+                            </p>
+                          )}
                         </>
                       )}
                     </div>
@@ -1061,7 +1078,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         {isFundConfirmed && <Check className="h-4 w-4 text-emerald-400 flex-shrink-0" />}
                         <div>
                           <p className="text-xs font-bold text-white">
-                            {isFundConfirmed ? 'Loan funded!' : 'Confirming…'}
+                            {!isFundConfirmed
+                              ? 'Confirming…'
+                              : remainingWei === 0n
+                              ? 'Loan funded!'
+                              : 'Contribution confirmed'}
                           </p>
                           <a
                             href={`https://sepolia.etherscan.io/tx/${fundingHash}`}
@@ -1124,7 +1145,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             </div>
           ) : (
             <div className="space-y-3">
-              {myPositions.map(({ id, terms, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal }) => {
+              {myPositions.map(({ id, terms, myContribution, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -1134,6 +1155,16 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 const collateralEth = parseFloat(formatEther(terms.collateralAmount));
                 const principalUsd = ethPrice > 0 ? principalEth * ethPrice : null;
                 const collateralUsd = ethPrice > 0 ? collateralEth * ethPrice : null;
+
+                // Pooled funding: this position may only be a fraction of the
+                // principal, not the whole loan. "You funded" and "Interest to
+                // earn" below must reflect that share, not the full loan.
+                const myContribEth = myContribution !== undefined ? parseFloat(formatEther(myContribution)) : null;
+                const myContribUsd = myContribEth !== null && ethPrice > 0 ? myContribEth * ethPrice : null;
+                const myShareFrac =
+                  myContribution !== undefined && terms.principalAmount > 0n
+                    ? Number(myContribution) / Number(terms.principalAmount)
+                    : 0;
 
                 // LTV read from the contract (frozen USD debt / live USD collateral).
                 // 0 means "unknown" (no oracle data), not "healthy" — fall back to
@@ -1149,7 +1180,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
 
                 const interestEarned =
                   principalUsd !== null
-                    ? principalUsd * (aprNum / 100) * (Number(terms.durationDays) / 365)
+                    ? principalUsd * myShareFrac * (aprNum / 100) * (Number(terms.durationDays) / 365)
                     : null;
 
                 const isLiquidating = liqLoanId === id;
@@ -1234,8 +1265,10 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       </div>
                       <div>
                         <p className="text-[10px] text-slate-600">You funded</p>
-                        <p className="text-sm font-mono font-bold text-white">{principalEth.toFixed(4)} ETH</p>
-                        {principalUsd && <p className="text-[11px] text-slate-500">{formatUsd(principalUsd)}</p>}
+                        <p className="text-sm font-mono font-bold text-white">
+                          {myContribEth !== null ? myContribEth.toFixed(4) : '…'} ETH
+                        </p>
+                        {myContribUsd && <p className="text-[11px] text-slate-500">{formatUsd(myContribUsd)}</p>}
                       </div>
                       <div>
                         <p className="text-[10px] text-slate-600">Interest to earn</p>
@@ -1416,11 +1449,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 Completed ({settledPositions.length})
               </p>
               <div className="space-y-2">
-                {settledPositions.map(({ id, terms, statusVal }) => {
+                {settledPositions.map(({ id, terms, statusVal, myContribution }) => {
                   if (!terms) return null;
                   const repaid = statusVal === 2;
-                  const principalEth = parseFloat(formatEther(terms.principalAmount));
                   const collateralEth = parseFloat(formatEther(terms.collateralAmount));
+                  const myContribEth = myContribution !== undefined ? parseFloat(formatEther(myContribution)) : null;
                   return (
                     <div
                       key={id.toString()}
@@ -1436,7 +1469,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       </span>
                       <span className="text-[11px] text-slate-500">
                         {repaid ? (
-                          <>Borrower repaid — you received your {principalEth.toFixed(4)} ETH plus interest.</>
+                          <>Borrower repaid - you received your {myContribEth !== null ? myContribEth.toFixed(4) : '…'} ETH contribution plus interest.</>
                         ) : (
                           <>You seized {collateralEth.toFixed(4)} ETH of collateral.</>
                         )}
