@@ -32,8 +32,9 @@ type EvalMode = 'persona' | 'wallet';
 // Max collateral we'll actually send on-chain for any demo tx (keeps Sepolia cost near-zero)
 const DEMO_MAX_COLLATERAL_ETH = 0.005;
 
-const LOAN_STATUS_ABI = [
+const LOAN_PROGRESS_ABI = [
   { name: 'status', type: 'function', inputs: [], outputs: [{ name: '', type: 'uint8' }], stateMutability: 'view' },
+  { name: 'totalContributed', type: 'function', inputs: [], outputs: [{ name: '', type: 'uint256' }], stateMutability: 'view' },
 ] as const;
 
 const LOAN_FACTORY_ABI = [
@@ -500,8 +501,19 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   // loan status instead.
   const { data: createdLoanStatus } = useReadContract({
     address: createdLoanContract,
-    abi: LOAN_STATUS_ABI,
+    abi: LOAN_PROGRESS_ABI,
     functionName: 'status',
+    chainId,
+    query: { enabled: Boolean(createdLoanContract), refetchInterval: 5_000 },
+  });
+
+  // Pooled funding progress for the "what happens next" tracker - several
+  // lenders can each fund part of the request, so a live percentage matters
+  // while it's still Requested instead of a single all-or-nothing signal.
+  const { data: createdLoanTotalContributed } = useReadContract({
+    address: createdLoanContract,
+    abi: LOAN_PROGRESS_ABI,
+    functionName: 'totalContributed',
     chainId,
     query: { enabled: Boolean(createdLoanContract), refetchInterval: 5_000 },
   });
@@ -1158,7 +1170,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                       Limit reached: {MAX_OPEN_REQUESTS} pending requests maximum
                     </p>
                     <p className="text-[11px] text-amber-300/70 mt-0.5">
-                      You have {pendingLoanCount} open loan requests. A lender must fund (or one must expire) before you can submit another.
+                      You have {pendingLoanCount} open loan requests. One must be fully funded by lenders (or expire) before you can submit another.
                     </p>
                   </div>
                 )}
@@ -1215,11 +1227,29 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                         const funded = st >= 1 && st !== 3;
                         const closed = st === 2;
                         const liquidated = st === 4;
+                        // Same bigint-first percentage LenderDashboard and
+                        // BorrowerLoansSection use, computed against the exact wei
+                        // amount sent on-chain in submitLoan() so it lines up with
+                        // the contract's own principalAmount.
+                        const principalWei = parseEther(demoTxAmounts.actualPrincipal.toFixed(18));
+                        const fundedWei = createdLoanTotalContributed ?? BigInt(0);
+                        const fundedPct =
+                          principalWei > BigInt(0)
+                            ? Number((fundedWei * BigInt(10_000)) / principalWei) / 100
+                            : 0;
                         return [
                           { Icon: Check, done: true, label: 'Loan contract deployed', desc: `CollateralVault holds your ${demoTxAmounts.actualCollateral.toFixed(6)} ETH` },
-                          { Icon: funded ? Check : Clock, done: funded, label: funded ? 'Lender funded your request' : 'Awaiting a lender (up to 7 days)', desc: `Lender sends ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH to fund your request` },
+                          {
+                            Icon: funded ? Check : Clock,
+                            done: funded,
+                            label: funded ? 'Lenders funded your request' : 'Awaiting lenders (up to 7 days)',
+                            desc:
+                              st === 0
+                                ? `${fundedPct.toFixed(0)}% funded - lenders can each fund part of the ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH`
+                                : `Lenders sent ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH to fund your request`,
+                          },
                           { Icon: Check, done: funded, label: 'You receive the principal', desc: `${demoTxAmounts.actualPrincipal.toFixed(6)} ETH sent to your wallet` },
-                          { Icon: ShieldCheck, done: closed, label: 'Repay to unlock collateral', desc: liquidated ? 'Loan was liquidated — collateral went to the lender' : `Repay within ${tenorDays} days to get your ETH back` },
+                          { Icon: ShieldCheck, done: closed, label: 'Repay to unlock collateral', desc: liquidated ? 'Loan was liquidated - collateral was split among your lenders' : `Repay within ${tenorDays} days to get your ETH back` },
                           { Icon: Check, done: closed, label: 'Collateral returned', desc: `Your ${demoTxAmounts.actualCollateral.toFixed(6)} ETH released from vault` },
                         ];
                       })().map(({ Icon, done, label, desc }) => (

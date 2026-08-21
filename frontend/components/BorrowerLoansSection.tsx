@@ -231,6 +231,24 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     [myLoanAddresses, chainId],
   );
 
+  // Round 4b: pooled funding progress - only meaningful while Requested, but
+  // reading for every loan is harmless and keeps this list index-aligned with
+  // the others.
+  const totalContributedContracts = useMemo(
+    () =>
+      myLoanAddresses.map((addr) => ({
+        address: addr,
+        abi: LOAN_ABI,
+        functionName: 'totalContributed' as const,
+        chainId,
+      })),
+    [myLoanAddresses, chainId],
+  );
+  const { data: totalContributedResults } = useReadContracts({
+    contracts: totalContributedContracts,
+    query: { enabled: totalContributedContracts.length > 0, refetchInterval: POLL_MS },
+  });
+
   const { data: outstandingResults, refetch: refetchOutstanding } = useReadContracts({
     contracts: outstandingContracts,
     query: { enabled: outstandingContracts.length > 0, refetchInterval: POLL_MS },
@@ -331,6 +349,15 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     return map;
   }, [isDelinquentContracts, isDelinquentResults]);
 
+  const totalContributedByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    totalContributedContracts.forEach((c, i) => {
+      const r = totalContributedResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [totalContributedContracts, totalContributedResults]);
+
   async function refetchAll() {
     await Promise.all([
       refetchStatus(), refetchOutstanding(), refetchRepaymentDueAt(), refetchIsDelinquent(), refetchPreview(),
@@ -351,7 +378,8 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         const isDelinquentVal = loanAddr ? isDelinquentByAddress.get(loanAddr) : undefined;
         const previewVal = loanAddr ? previewByAddress.get(loanAddr) : undefined;
         const priceAtFundingVal = loanAddr ? priceAtFundingByAddress.get(loanAddr) : undefined;
-        return { id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal, priceAtFundingVal };
+        const totalContributedVal = loanAddr ? totalContributedByAddress.get(loanAddr) : undefined;
+        return { id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal, priceAtFundingVal, totalContributedVal };
       })
       .sort((a, b) => Number(b.terms.createdAt) - Number(a.terms.createdAt));
   }, [
@@ -364,6 +392,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     isDelinquentByAddress,
     previewByAddress,
     priceAtFundingByAddress,
+    totalContributedByAddress,
   ]);
 
   // Settlement history for closed loans — the record MetaMask can't give them.
@@ -499,7 +528,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
         </div>
       ) : (
         <div className="space-y-3">
-          {loansWithTx.map(({ id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal, priceAtFundingVal, txHash }) => {
+          {loansWithTx.map(({ id, terms, statusVal, outstandingVal, repaymentDueAtVal, isDelinquentVal, previewVal, priceAtFundingVal, totalContributedVal, txHash }) => {
             const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
             const aprNum = Number(terms.interestBps) / 100;
             const principalEth = parseFloat(formatEther(terms.principalAmount));
@@ -510,6 +539,13 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
             const statusText = STATUS_LABEL[statusNum] ?? 'Unknown';
             const isOpen = statusNum === 0;
             const isFunded = statusNum === 1;
+            // Pooled funding progress - same bigint-first calculation LenderDashboard
+            // uses, so the percentage a borrower sees matches what lenders see.
+            const fundedWei = totalContributedVal ?? BigInt(0);
+            const fundedPct =
+              terms.principalAmount > BigInt(0)
+                ? Number((fundedWei * BigInt(10_000)) / terms.principalAmount) / 100
+                : 0;
             const interestUsd =
               principalUsd !== null
                 ? principalUsd * (aprNum / 100) * (Number(terms.durationDays) / 365)
@@ -617,6 +653,29 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                   </div>
                 </div>
 
+                {/* Funding progress - only meaningful while still Requested; matches
+                    the visual treatment lenders see in LenderDashboard so the same
+                    loan reads the same way from either side. */}
+                {isOpen && (
+                  <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 mb-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500 mb-1.5">
+                      <span>Funding progress</span>
+                      <span className="font-mono text-slate-400">
+                        {parseFloat(formatEther(fundedWei)).toFixed(4)} / {principalEth.toFixed(4)} ETH funded
+                      </span>
+                    </div>
+                    <div className="relative h-2.5 w-full rounded-full bg-slate-800 overflow-hidden mb-1.5">
+                      <div
+                        className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                        style={{ width: `${Math.min(fundedPct, 100)}%` }}
+                      />
+                    </div>
+                    <p className="text-[11px] text-slate-600">
+                      {fundedPct.toFixed(0)}% funded - waiting for lenders
+                    </p>
+                  </div>
+                )}
+
                 {/* Repay — only meaningful once the loan is Funded */}
                 {isFunded && (
                   <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 mb-3">
@@ -712,7 +771,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                       Partial payments are fine — pay what you can now and the rest later, before the deadline.
                       {previewVal && (
                         <>
-                          {' '}If this were liquidated right now the lender would take{' '}
+                          {' '}If this were liquidated right now your lenders would take{' '}
                           <span className="font-mono text-amber-500/80">
                             {parseFloat(formatEther(previewVal.seize)).toFixed(6)} ETH
                           </span>{' '}
