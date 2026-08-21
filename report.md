@@ -1,6 +1,6 @@
 # NexusFi P2P Lending Platform - Implementation Report
 
-> Generated 2026-07-29 from the live codebase and PLAN.md; last updated 2026-08-20 after Phase 2 (peer discovery) shipped.
+> Generated 2026-07-29 from the live codebase and PLAN.md; last updated 2026-08-21 after Phase 3 (multi-lender pooling) shipped.
 > This is a status snapshot of what actually runs, not a spec of intent.
 > For the phased plan of remaining work see `planv2.md`; for the reasoning behind the design see `projectknowledge.md`.
 
@@ -8,7 +8,7 @@
 
 Borrowers lock ETH collateral on-chain and request a loan.
 An explainable rule-based risk engine (with an optional real ML backend and graceful fallback) assigns a Tier A/B/C that deterministically sets max LTV, interest spread, and liquidation buffer.
-The borrower signs an EIP-712 term sheet, lenders browse open requests and fund wallet-to-wallet, and the smart contract acts as escrow and enforcer.
+The borrower signs an EIP-712 term sheet, and up to 10 lenders each contribute part of one loan; the contract escrows contributions, pays the borrower only when the pool fills, and splits every repayment and liquidation seizure pro-rata.
 Repayment (partial or full), deadline enforcement, and liquidation (delinquency or collateral shortfall) all settle on-chain.
 KYC, auth, and off-chain metadata live in Supabase.
 The full lifecycle is deployed and working end-to-end on the Sepolia testnet.
@@ -40,7 +40,7 @@ All three are populated in `frontend/.env`. Source-verified on Blockscout and So
 
 ### Smart contracts (`contracts/contracts/`)
 
-- **Loan.sol** - core lifecycle. `fund()` with a 7-day funding window, `repay()` accepting any partial or full amount against a live `outstandingBalance()`, `cancel()`, and `liquidate()` gated on a real deadline + 2-day grace period **or** an oracle-priced LTV breach.
+- **Loan.sol** - core lifecycle. `contribute()` accumulating pooled contributions within a 7-day funding window, `repay()` accepting any partial or full amount against a live `outstandingBalance()`, `cancel()`, `reclaimContribution()`, `withdraw()`, and `liquidate()` gated on a real deadline + 2-day grace period **or** an oracle-priced LTV breach.
 - Interest accrues continuously from `fundedAt` via `interestDue()`, capped once the loan becomes liquidatable so it never inflates forever.
 - Partial liquidation: `liquidate()` seizes only `min(outstandingBalance, collateralAmount)` and refunds the surplus to the borrower in the same tx. `liquidationPreview()` exposes the split before anyone clicks.
 - Oracle price trigger: debt is frozen in USD at funding (`debtValueUsd`, `priceAtFunding`) while collateral is valued live, so an ETH crash actually raises LTV. Fail-safe: a missing, reverting, or zero-price oracle disables price liquidation rather than seizing collateral.
@@ -52,7 +52,7 @@ All three are populated in `frontend/.env`. Source-verified on Blockscout and So
 - **MockERC20.sol** - deployed, not yet wired as a loan asset (Phase 2).
 - **KYCRegistry.sol** - on-chain KYC reference, intentionally unused (KYC enforced off-chain).
 - Hardhat Ignition module `NexusFiMilestone1.ts` deploys and wires all three in one shot; config has `localhost` and `sepolia` networks; compiles clean on solc 0.8.28.
-- **28/28 contract tests passing** (`NexusFiMilestone1.ts` + `LoanLifecycle.ts`) covering partial/full repayment, overpayment refunds, interest accrual and capping, both liquidation triggers, and partial-liquidation fairness.
+- **54/54 contract tests passing** (`NexusFiMilestone1.ts`, `LoanLifecycle.ts`, `MultiLenderFunding.ts`, `MultiLenderSettlement.ts`) covering partial/full repayment, overpayment refunds, interest accrual and capping, both liquidation triggers, partial-liquidation fairness, and the full pooling surface: partial fills, over-fill refunds, the lender cap, pro-rata splits with exact-sum rounding-dust assertions, the hybrid push/pull fallback, and reclaim on cancel or expiry.
 
 ### Frontend - borrower
 
@@ -90,6 +90,22 @@ All three are populated in `frontend/.env`. Source-verified on Blockscout and So
 - Exit criterion met: a user can find another verified user by name or wallet and see their open loans without knowing a loan ID.
 - Verified statically: 132/132 tests, `tsc --noEmit` clean, eslint clean.
 Track F manual browser verification (`tests/MANUAL_TEST_PLAN.md`, needs two accounts) is still outstanding.
+
+### Multi-lender pooling (Phase 3, shipped 2026-08-21)
+
+Contract change, so this forced a full Sepolia redeploy; the addresses in the table above are the pooled set.
+Loans on the previous factory stay there and do not appear in the new marketplace.
+
+- **`Loan.sol` rewritten around a pool.** `contribute()` escrows partial contributions in the Loan contract while the loan is `Requested`; the borrower is paid, and status flips to `Funded`, only when contributions reach `principalAmount` exactly.
+Over-contribution is accepted and the excess refunded in the same transaction, which is what lets a closing contributor cover a gap smaller than the 1% minimum.
+`MAX_LENDERS = 10` bounds every later distribution loop; a repeat contribution tops up an existing share rather than taking a new slot.
+- **Pro-rata distribution with exact-sum dust handling.** Every repayment and every liquidation seizure splits by `contribution / principalAmount`. Each lender except the last receives the exact floor via `Math.mulDiv`; the last receives the remainder, so the distributed total always equals the applied amount to the wei.
+- **Hybrid settlement: push where possible, pull where not.** Each share is sent with a gas-capped call. On failure the share is credited to `pendingWithdrawals` for the lender to `withdraw()`, so a lender using a contract wallet that reverts on receive can only affect their own share and can never block the borrower's repayment. A pure push loop would have let one hostile contributor hold a borrower's collateral hostage.
+- **Liquidation is callable by any contributor**, not one designated lender, and routes the seizure through the Loan (its `receive()` is gated to the vault) so the same pro-rata split applies. `CollateralVault.sol` needed no change.
+- **Reclaim for dead pools.** `reclaimContribution()` returns an escrowed contribution when the borrower cancels or the funding window expires while still `Requested`. Pull-based, so no refund loop.
+- **`fastForward`'s gate is status-dependent**: borrower-only while `Requested`, borrower or any contributor once `Funded`. A review found that the wider gate would have let a 1% contributor rewind an open request past its window and permanently brick it for the cost of gas.
+- **Frontend.** Funding progress and a contribute-amount input on Open Requests (with the 1%-minimum edge case explained in place), per-share figures throughout My Positions, a claim banner for undelivered shares and a reclaim card for dead pools, per-share settlement receipts and PDF statements driven by the `ShareDistributed` event, borrower-side funding progress, and a borrower Cancel control.
+- **157/157 frontend unit tests**, including `lib/share-math.test.ts` covering share summing, viewer filtering, and pending-share detection.
 
 ### Auth, KYC, infrastructure
 
@@ -147,8 +163,9 @@ Final merged state (2026-08-03): a teammate independently built a dedicated `Eth
 `RiskExplanationPanel.tsx` restyled to the app's dark theme; the `bg-white` wrapper in `LoanRequestPanel.tsx` that was forcing it light has been removed too.
 Phase 2 (peer discovery) is code-complete and pushed as of 2026-08-20; see the "Peer discovery" section above.
 
-- Liquidation is not automatic (lender must click; no keeper/bot) - deferred to Phase 4.
-- Single-lender funding only (no multi-lender pooling) - deferred to Phase 3.
+- Liquidation is not automatic (a contributor must click; no keeper/bot) - deferred to Phase 4.
+- **Multi-lender pooling - closed 2026-08-21.**
+Shipped as Phase 3; see the section above. Track G manual verification remains open.
 - No IPFS-anchored term sheets, no on-chain event indexer/dashboards, no SHAP/versioned ML - deferred to Phase 5/6.
 - **Peer discovery - closed 2026-08-20** (was "users find each other by loan ID").
 Directory search and public profile pages shipped as Phase 2; only Track F manual browser verification remains open.
