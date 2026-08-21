@@ -9,7 +9,7 @@ import {
   useAccount,
   useSwitchChain,
 } from 'wagmi';
-import { formatEther } from 'viem';
+import { formatEther, parseEther } from 'viem';
 import { sepolia, hardhat } from 'wagmi/chains';
 import { inferRiskTierFromBps, RISK_TIER_CONFIG, BASE_APR } from '../lib/loan-terms';
 import { formatUsd, formatPercent } from '../lib/format';
@@ -106,6 +106,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
   const [fundingHash, setFundingHash] = useState<`0x${string}` | undefined>(undefined);
   const [fundingError, setFundingError] = useState<string | null>(null);
   const [fundingErrorLoanId, setFundingErrorLoanId] = useState<bigint | null>(null);
+  const [contributionInputs, setContributionInputs] = useState<Record<string, string>>({});
   const [liqLoanId, setLiqLoanId] = useState<bigint | null>(null);
   const [liqHash, setLiqHash] = useState<`0x${string}` | undefined>(undefined);
 
@@ -199,6 +200,49 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     contracts: lenderContracts,
     query: { enabled: lenderContracts.length > 0, refetchInterval: POLL_MS },
   });
+
+  // ── Pooled funding progress: how much of the principal each loan already has ──
+  const totalContributedContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'totalContributed' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: totalContributedResults, refetch: refetchTotalContributed } = useReadContracts({
+    contracts: totalContributedContracts,
+    query: { enabled: totalContributedContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const totalContributedByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    totalContributedContracts.forEach((c, i) => {
+      const r = totalContributedResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [totalContributedContracts, totalContributedResults]);
+
+  // Read per loan rather than assuming principal/100, so the UI stays correct
+  // if the contract's minimum-contribution rule ever changes.
+  const minContributionContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'minContribution' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: minContributionResults, refetch: refetchMinContribution } = useReadContracts({
+    contracts: minContributionContracts,
+    query: { enabled: minContributionContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const minContributionByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    minContributionContracts.forEach((c, i) => {
+      const r = minContributionResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [minContributionContracts, minContributionResults]);
 
   // ── Round 4: real delinquency/liquidation state for funded loans only ──
   const isLiquidatableContracts = useMemo(
@@ -435,6 +479,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       refetchIds(),
       refetchStatus(),
       refetchLenders(),
+      refetchTotalContributed(),
+      refetchMinContribution(),
       refetchIsLiquidatable(),
       refetchRepaymentDueAt(),
       refetchLtv(),
@@ -474,6 +520,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const loanAddr = terms?.loanContract?.toLowerCase();
       const statusVal = loanAddr !== undefined ? statusByAddress.get(loanAddr) : undefined;
       const myContribution = loanAddr !== undefined ? myContributionByAddress.get(loanAddr) : undefined;
+      const totalContributedVal = loanAddr !== undefined ? totalContributedByAddress.get(loanAddr) : undefined;
+      const minContributionVal = loanAddr !== undefined ? minContributionByAddress.get(loanAddr) : undefined;
       const isLiquidatableVal = loanAddr !== undefined ? isLiquidatableByAddress.get(loanAddr) : undefined;
       const repaymentDueAtVal = loanAddr !== undefined ? repaymentDueAtByAddress.get(loanAddr) : undefined;
       const ltvBpsVal = loanAddr !== undefined ? ltvByAddress.get(loanAddr) : undefined;
@@ -483,12 +531,12 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const outstandingVal = loanAddr !== undefined ? outstandingByAddress.get(loanAddr) : undefined;
       const priceAtFundingVal = loanAddr !== undefined ? priceAtFundingByAddress.get(loanAddr) : undefined;
       return {
-        id, terms, statusVal, myContribution, isLiquidatableVal, repaymentDueAtVal,
+        id, terms, statusVal, myContribution, totalContributedVal, minContributionVal, isLiquidatableVal, repaymentDueAtVal,
         ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal,
       };
     });
   }, [
-    loanIds, termsResults, statusByAddress, myContributionByAddress, isLiquidatableByAddress,
+    loanIds, termsResults, statusByAddress, myContributionByAddress, totalContributedByAddress, minContributionByAddress, isLiquidatableByAddress,
     repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress, previewByAddress, outstandingByAddress, priceAtFundingByAddress,
   ]);
 
@@ -537,7 +585,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     [loans],
   );
 
-  async function fundLoan(loanContractAddr: `0x${string}`, principalWei: bigint, loanId: bigint) {
+  async function contributeLoan(loanContractAddr: `0x${string}`, amountWei: bigint, loanId: bigint) {
     setFundingError(null);
     setFundingErrorLoanId(null);
     setFundingLoanId(loanId);
@@ -548,7 +596,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
         address: loanContractAddr,
         abi: LOAN_ABI,
         functionName: 'contribute',
-        value: principalWei,
+        value: amountWei,
         chainId,
       });
       setFundingHash(hash);
@@ -558,6 +606,26 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       setFundingErrorLoanId(loanId);
       setFundingLoanId(null);
     }
+  }
+
+  // Client-side check mirroring contribute()'s own require()s, so a bad
+  // amount fails with a readable message here instead of a wallet revert.
+  // over-contributing is deliberately NOT rejected - the contract caps what
+  // it accepts at the remaining gap and refunds the rest in the same tx.
+  function validateContribution(raw: string, minWei: bigint): { amountWei: bigint } | { error: string } {
+    const trimmed = raw.trim();
+    if (!trimmed) return { error: 'Enter an amount' };
+    let amountWei: bigint;
+    try {
+      amountWei = parseEther(trimmed);
+    } catch {
+      return { error: 'Enter a valid ETH amount' };
+    }
+    if (amountWei <= 0n) return { error: 'Amount must be greater than zero' };
+    if (amountWei < minWei) {
+      return { error: `Minimum contribution is ${formatEther(minWei)} ETH` };
+    }
+    return { amountWei };
   }
 
   async function liquidateLoan(loanContractAddr: `0x${string}`, loanId: bigint) {
@@ -673,14 +741,14 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
               {/* Column headers */}
               <div className="hidden md:grid grid-cols-[2fr_1.2fr_1.2fr_1fr_1fr_auto] gap-3 px-5 text-[10px] font-bold text-slate-600 uppercase tracking-widest">
                 <span>Borrower / Tier</span>
-                <span>You send</span>
+                <span>Principal</span>
                 <span>You earn</span>
                 <span>Duration</span>
                 <span>Current LTV</span>
-                <span />
+                <span>Funded</span>
               </div>
 
-              {openLoans.map(({ id, terms }) => {
+              {openLoans.map(({ id, terms, totalContributedVal, minContributionVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -690,6 +758,37 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 const collateralEth = parseFloat(formatEther(terms.collateralAmount));
                 const principalUsd = ethPrice > 0 ? principalEth * ethPrice : null;
                 const collateralUsd = ethPrice > 0 ? collateralEth * ethPrice : null;
+
+                // Pooled funding progress. totalContributedVal is undefined only
+                // while the read is still in flight, not "zero" - but 0n is the
+                // correct starting value for a brand-new request either way.
+                const fundedWei = totalContributedVal ?? 0n;
+                const fundedPct =
+                  terms.principalAmount > 0n
+                    ? Number((fundedWei * 10_000n) / terms.principalAmount) / 100
+                    : 0;
+                const remainingWei =
+                  terms.principalAmount > fundedWei ? terms.principalAmount - fundedWei : 0n;
+                // Fallback mirrors the contract's own formula for the brief window
+                // before minContribution() resolves, so the input isn't blocked.
+                const minWei =
+                  minContributionVal ?? (terms.principalAmount / 100n === 0n ? 1n : terms.principalAmount / 100n);
+                // "Fill the rest" must be at least minWei even when the remaining
+                // gap is smaller than that - contribute() checks msg.value against
+                // minContribution() regardless of how much of it is actually needed,
+                // and refunds the surplus in the same transaction.
+                const remainingOrMinWei = remainingWei > minWei ? remainingWei : minWei;
+                // Quick-fill shortcuts, each floored at minWei for the same reason.
+                const quickFill25Wei = (() => {
+                  const v = (remainingWei * 25n) / 100n;
+                  return v > minWei ? v : minWei;
+                })();
+                const quickFill50Wei = (() => {
+                  const v = (remainingWei * 50n) / 100n;
+                  return v > minWei ? v : minWei;
+                })();
+                const idKey = id.toString();
+                const contributionInput = contributionInputs[idKey] ?? formatEther(remainingOrMinWei);
 
                 // Origination LTV = principal / collateral. Price-independent by
                 // design (both legs are ETH) — correct for a not-yet-funded loan,
@@ -746,17 +845,19 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                           <p className="font-mono text-white">{terms.borrower.slice(0, 8)}…{terms.borrower.slice(-6)}</p>
                         </div>
                         <div>
-                          <p className="text-slate-600 text-[10px]">You send</p>
+                          <p className="text-slate-600 text-[10px]">Principal</p>
                           <p className="font-mono font-bold text-white">{principalEth.toFixed(4)} ETH</p>
                           {principalUsd && <p className="text-slate-500">{formatUsd(principalUsd)}</p>}
                         </div>
                       </div>
-                      <FundButton
-                        isTxInFlight={isTxInFlight}
-                        isTxDone={isTxDone}
-                        isSelf={isSelfLoan}
-                        onFund={() => void fundLoan(terms.loanContract, terms.principalAmount, id)}
-                      />
+                      {isSelfLoan && (
+                        <div
+                          className="inline-flex h-7 px-3 rounded-lg border border-slate-700 bg-slate-900/50 items-center text-[11px] font-bold text-slate-600 whitespace-nowrap cursor-not-allowed"
+                          title="You cannot fund your own loan request"
+                        >
+                          Your request
+                        </div>
+                      )}
                     </div>
 
                     {/* Desktop layout */}
@@ -809,12 +910,16 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         )}
                       </div>
 
-                      <FundButton
-                        isTxInFlight={isTxInFlight}
-                        isTxDone={isTxDone}
-                        isSelf={isSelfLoan}
-                        onFund={() => void fundLoan(terms.loanContract, terms.principalAmount, id)}
-                      />
+                      <div className="text-right">
+                        {isSelfLoan ? (
+                          <span className="text-[11px] font-bold text-slate-600 whitespace-nowrap">Your request</span>
+                        ) : (
+                          <>
+                            <p className="text-sm font-mono font-bold text-emerald-400">{fundedPct.toFixed(0)}%</p>
+                            <p className="text-[10px] text-slate-600">funded</p>
+                          </>
+                        )}
+                      </div>
                     </div>
 
                     {/* Collateral detail row */}
@@ -835,6 +940,101 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       >
                         Contract ↗
                       </a>
+                    </div>
+
+                    {/* Funding progress + contribute control */}
+                    <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500 mb-1.5">
+                        <span>Funding progress</span>
+                        <span className="font-mono text-slate-400">
+                          {parseFloat(formatEther(fundedWei)).toFixed(4)} / {principalEth.toFixed(4)} ETH funded
+                        </span>
+                      </div>
+                      <div className="relative h-2.5 w-full rounded-full bg-slate-800 overflow-hidden mb-3">
+                        <div
+                          className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                          style={{ width: `${Math.min(fundedPct, 100)}%` }}
+                        />
+                      </div>
+
+                      {isSelfLoan ? (
+                        <p className="text-[11px] font-bold text-slate-600">
+                          You cannot fund your own loan request.
+                        </p>
+                      ) : isTxDone ? (
+                        <div className="flex items-center gap-2 text-xs font-bold text-emerald-400">
+                          <Check className="h-3.5 w-3.5" /> Contribution sent
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.000001"
+                              value={contributionInput}
+                              onChange={(e) =>
+                                setContributionInputs((prev) => ({ ...prev, [idKey]: e.target.value }))
+                              }
+                              placeholder="Amount in ETH"
+                              className="h-9 w-40 rounded-lg border border-slate-700 bg-slate-900 px-3 text-xs font-mono text-white focus:outline-none focus:border-blue-500/60"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setContributionInputs((prev) => ({ ...prev, [idKey]: formatEther(quickFill25Wei) }))
+                              }
+                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap"
+                            >
+                              25%
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setContributionInputs((prev) => ({ ...prev, [idKey]: formatEther(quickFill50Wei) }))
+                              }
+                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap"
+                            >
+                              50%
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setContributionInputs((prev) => ({ ...prev, [idKey]: formatEther(remainingOrMinWei) }))
+                              }
+                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap"
+                            >
+                              Remaining
+                            </button>
+                            <button
+                              onClick={() => {
+                                const result = validateContribution(contributionInput, minWei);
+                                if ('error' in result) {
+                                  setFundingError(result.error);
+                                  setFundingErrorLoanId(id);
+                                  return;
+                                }
+                                void contributeLoan(terms.loanContract, result.amountWei, id);
+                              }}
+                              disabled={isTxInFlight}
+                              className="h-9 px-4 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap shadow-lg shadow-blue-500/20"
+                            >
+                              {isTxInFlight ? (
+                                <>
+                                  <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                                  {isFunding && isFundConfirming ? 'Confirming…' : 'Confirm…'}
+                                </>
+                              ) : (
+                                'Contribute'
+                              )}
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-slate-700 mt-1.5">
+                            Minimum contribution: <span className="font-mono text-slate-500">{formatEther(minWei)} ETH</span>.
+                            {' '}Sending more than what is left is fine, the contract only takes what is needed and refunds the rest.
+                          </p>
+                        </>
+                      )}
                     </div>
 
                     {/* Why this tier + what protects the lender, before they commit capital */}
@@ -889,9 +1089,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             <ol className="space-y-2">
               {[
                 { n: '1', text: 'Browse open requests. Borrowers have already locked collateral.' },
-                { n: '2', text: 'Click Fund to send the exact principal amount. Your ETH goes directly to the borrower.' },
+                { n: '2', text: 'Contribute any amount at or above the minimum. Several lenders can fund the same loan; once contributions reach the full principal, it goes to the borrower.' },
                 { n: '3', text: 'The borrower repays principal + interest within the loan duration' },
-                { n: '4', text: 'Repayment is sent to your wallet. Their collateral is released.' },
+                { n: '4', text: 'Repayment is sent to your wallet, split by your share of the pool. Their collateral is released.' },
                 { n: '5', text: "If the borrower misses the repayment deadline (plus a short grace period), Liquidate becomes available to seize their collateral." },
               ].map(({ n, text }) => (
                 <li key={n} className="flex items-start gap-3">
@@ -1272,51 +1472,5 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
         </>
       )}
     </div>
-  );
-}
-
-function FundButton({
-  isTxInFlight,
-  isTxDone,
-  isSelf,
-  onFund,
-}: {
-  isTxInFlight: boolean;
-  isTxDone: boolean;
-  isSelf: boolean;
-  onFund: () => void;
-}) {
-  if (isSelf) {
-    return (
-      <div
-        className="h-9 px-4 rounded-xl border border-slate-700 bg-slate-900/50 flex items-center text-[11px] font-bold text-slate-600 whitespace-nowrap cursor-not-allowed"
-        title="You cannot fund your own loan request"
-      >
-        Your request
-      </div>
-    );
-  }
-  if (isTxDone) {
-    return (
-      <div className="h-9 px-4 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center gap-2 text-xs font-bold text-emerald-400">
-        <Check className="h-3.5 w-3.5" /> Funded
-      </div>
-    );
-  }
-  return (
-    <button
-      onClick={onFund}
-      disabled={isTxInFlight}
-      className="h-9 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap shadow-lg shadow-blue-500/20"
-    >
-      {isTxInFlight ? (
-        <>
-          <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
-          Funding…
-        </>
-      ) : (
-        'Fund Loan →'
-      )}
-    </button>
   );
 }
