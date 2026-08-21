@@ -12,6 +12,8 @@ function getStructValue<T>(record: unknown, index: number, key: string): T {
 }
 
 const INITIAL_PRICE = 2_000n;
+const DAY = 86_400n;
+const GRACE_PERIOD = 2n * DAY;
 
 describe("Multi-lender repayment settlement", async function () {
   const { viem } = await network.connect();
@@ -48,6 +50,29 @@ describe("Multi-lender repayment settlement", async function () {
       client: { wallet: deployer, public: publicClient },
     });
     return { collateralVault, loanFactory, mockPriceFeed, loan, loanAddress };
+  }
+
+  // Reads the actual seized/refunded amounts from the LoanLiquidated event
+  // emitted by the liquidate() transaction at blockNumber, rather than from a
+  // pre-transaction liquidationPreview() - interest accrues per second, so
+  // only post-transaction state is authoritative.
+  async function getLiquidatedEvent(
+    loanAddress: `0x${string}`,
+    abi: unknown,
+    blockNumber: bigint,
+  ) {
+    const events = await publicClient.getContractEvents({
+      address: loanAddress,
+      abi: abi as never,
+      eventName: "LoanLiquidated",
+      fromBlock: blockNumber,
+      toBlock: blockNumber,
+    });
+    return events[0].args as {
+      lender: string;
+      seizedAmount: bigint;
+      refundedToBorrower: bigint;
+    };
   }
 
   // NOTE on timing (see LoanLifecycle.ts lines 83-90): never assert against a
@@ -289,5 +314,180 @@ describe("Multi-lender repayment settlement", async function () {
     assert.equal((receiverEvent!.args as { pending?: boolean }).pending, false);
     // Instant push, not the pull-fallback path.
     assert.equal(await loan.read.pendingWithdrawals([receiver.address]), 0n);
+  });
+
+  // --- Liquidation split + participation gates ---------------------------
+  //
+  // liquidate() runs the same _distribute() as repay(), so the pro-rata and
+  // dust rules are identical. These tests read the actual seized amount from
+  // the LoanLiquidated event emitted by the liquidate() transaction, never
+  // from a pre-transaction liquidationPreview() - see the timing note above.
+
+  it("splits a liquidation seizure pro-rata across two lenders and refunds the borrower surplus", async function () {
+    const { loan, loanAddress } = await deployRequestedLoan();
+    await loan.write.contribute({ account: lenderA.account, value: parseEther("0.6") });
+    await loan.write.contribute({ account: lenderB.account, value: parseEther("0.4") });
+
+    await loan.write.fastForward([durationDays * DAY + GRACE_PERIOD + 60n], { account: lenderA.account });
+    assert.equal(await loan.read.isLiquidatable(), true);
+
+    const aBefore = await publicClient.getBalance({ address: lenderA.account.address });
+    const bBefore = await publicClient.getBalance({ address: lenderB.account.address });
+    const borrowerBefore = await publicClient.getBalance({ address: borrower.account.address });
+
+    // B, not A (the first contributor), triggers: proves any contributor can liquidate.
+    const hash = await loan.write.liquidate({ account: lenderB.account });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    const gas = receipt.gasUsed * receipt.effectiveGasPrice;
+
+    const { seizedAmount, refundedToBorrower } = await getLiquidatedEvent(loanAddress, loan.abi, receipt.blockNumber);
+
+    const aAfter = await publicClient.getBalance({ address: lenderA.account.address });
+    const bAfter = await publicClient.getBalance({ address: lenderB.account.address });
+    const borrowerAfter = await publicClient.getBalance({ address: borrower.account.address });
+
+    // A holds 60% and is not last in _lenders, so A's share is an exact
+    // floor of the ACTUAL seized amount; B is last and absorbs the dust.
+    const aShare = (seizedAmount * parseEther("0.6")) / parseEther("1");
+    assert.equal(aAfter - aBefore, aShare);
+    assert.equal(bAfter - bBefore + gas, seizedAmount - aShare);
+    // No wei created or destroyed: A + B's shares sum exactly to the seizure.
+    assert.equal((aAfter - aBefore) + (bAfter - bBefore + gas), seizedAmount);
+
+    // Borrower's surplus refund is routed by the vault directly, not through
+    // _distribute; it must equal the event's figure exactly, and seizure plus
+    // refund must exactly reconstruct the original collateral.
+    assert.equal(borrowerAfter - borrowerBefore, refundedToBorrower);
+    assert.equal(seizedAmount + refundedToBorrower, collateralAmount);
+    assert.equal(await loan.read.status(), 4); // Liquidated
+  });
+
+  it("three lenders: liquidation seizure splits exactly, with real interest dust", async function () {
+    const { loan, loanAddress } = await deployRequestedLoan();
+    await loan.write.contribute({ account: lenderA.account, value: parseEther("0.5") });
+    await loan.write.contribute({ account: lenderB.account, value: parseEther("0.3") });
+    await loan.write.contribute({ account: lenderC.account, value: parseEther("0.2") });
+
+    await loan.write.fastForward([durationDays * DAY + GRACE_PERIOD + 60n], { account: lenderA.account });
+    assert.equal(await loan.read.isLiquidatable(), true);
+
+    const aBefore = await publicClient.getBalance({ address: lenderA.account.address });
+    const bBefore = await publicClient.getBalance({ address: lenderB.account.address });
+    const cBefore = await publicClient.getBalance({ address: lenderC.account.address });
+
+    const hash = await loan.write.liquidate({ account: lenderC.account });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    const gas = receipt.gasUsed * receipt.effectiveGasPrice;
+
+    const { seizedAmount } = await getLiquidatedEvent(loanAddress, loan.abi, receipt.blockNumber);
+
+    const aAfter = await publicClient.getBalance({ address: lenderA.account.address });
+    const bAfter = await publicClient.getBalance({ address: lenderB.account.address });
+    const cAfter = await publicClient.getBalance({ address: lenderC.account.address });
+
+    // A holds 50%, B 30%; both are non-last and get an exact floor share of
+    // the ACTUAL seized amount. C is last, so C absorbs the dust.
+    const aShare = (seizedAmount * parseEther("0.5")) / parseEther("1");
+    const bShare = (seizedAmount * parseEther("0.3")) / parseEther("1");
+    const cShare = seizedAmount - aShare - bShare;
+
+    assert.equal(aAfter - aBefore, aShare);
+    assert.equal(bAfter - bBefore, bShare);
+    assert.equal(cAfter - cBefore + gas, cShare);
+    assert.equal((aAfter - aBefore) + (bAfter - bBefore) + (cAfter - cBefore + gas), seizedAmount);
+
+    // Confirm this seizure really does produce dust: the naive floor for C's
+    // own 20% share differs from what C actually received.
+    const naiveCShare = (seizedAmount * parseEther("0.2")) / parseEther("1");
+    assert.notEqual(cShare, naiveCShare);
+    assert.equal(await loan.read.status(), 4); // Liquidated
+  });
+
+  it("a non-contributor cannot liquidate", async function () {
+    const { loan } = await deployRequestedLoan();
+    await loan.write.contribute({ account: lenderA.account, value: parseEther("1") });
+    await loan.write.fastForward([durationDays * DAY + GRACE_PERIOD + 60n], { account: lenderA.account });
+    await viem.assertions.revertWith(
+      loan.write.liquidate({ account: lenderB.account }),
+      "Loan: caller is not a lender",
+    );
+  });
+
+  it("rejects plain ETH transfers from anyone but the vault", async function () {
+    const { loanAddress } = await deployRequestedLoan();
+    await assert.rejects(
+      lenderA.sendTransaction({ to: loanAddress, value: parseEther("0.1") }),
+    );
+  });
+
+  it("once Funded, any contributor may fastForward but a stranger may not", async function () {
+    // The gate is status-dependent (see commit ae3a445): borrower-only while
+    // Requested, borrower-or-contributor once Funded. This covers the Funded
+    // branch; MultiLenderFunding.ts covers the Requested branch.
+    const { loan } = await deployRequestedLoan();
+    await loan.write.contribute({ account: lenderA.account, value: parseEther("0.6") });
+    await loan.write.contribute({ account: lenderB.account, value: parseEther("0.4") });
+    assert.equal(await loan.read.status(), 1); // Funded
+
+    // deployer contributed nothing to this loan
+    await viem.assertions.revertWith(
+      loan.write.fastForward([DAY], { account: deployer.account }),
+      "Loan: not a participant",
+    );
+    await loan.write.fastForward([DAY], { account: lenderA.account }); // contributor: must not revert
+    await loan.write.fastForward([DAY], { account: borrower.account }); // borrower: must not revert
+  });
+
+  it("a liquidation with a reverting contract lender still completes, crediting its share for withdrawal", async function () {
+    const { loan, loanAddress } = await deployRequestedLoan();
+    const rejecting = await viem.deployContract("RejectingReceiver", [], {
+      client: { wallet: deployer, public: publicClient },
+    });
+    // rejecting contributes first, so it is _lenders[0], NOT the last lender:
+    // its share is an exact floor, with no dust, independently computable.
+    await rejecting.write.contributeTo([loanAddress], { account: deployer.account, value: parseEther("0.4") });
+    await loan.write.contribute({ account: lenderA.account, value: parseEther("0.6") });
+
+    await loan.write.fastForward([durationDays * DAY + GRACE_PERIOD + 60n], { account: lenderA.account });
+    assert.equal(await loan.read.isLiquidatable(), true);
+
+    const aBefore = await publicClient.getBalance({ address: lenderA.account.address });
+
+    // accept stays false: the push to rejecting reverts, so its share must be
+    // credited. lenderA triggers, proving the reverting co-lender cannot
+    // block the seizure.
+    const hash = await loan.write.liquidate({ account: lenderA.account });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    const gas = receipt.gasUsed * receipt.effectiveGasPrice;
+
+    assert.equal(await loan.read.status(), 4); // liquidation was NOT blocked
+
+    const { seizedAmount } = await getLiquidatedEvent(loanAddress, loan.abi, receipt.blockNumber);
+
+    // Independently compute the expected share instead of trusting the
+    // contract's own recorded value: floor rejecting's known 0.4 ETH
+    // contribution out of the 1 ETH principal against the actual seizure.
+    const expectedShare = (seizedAmount * parseEther("0.4")) / parseEther("1");
+
+    const credited = await loan.read.pendingWithdrawals([rejecting.address]);
+    assert.ok(credited > 0n, "failed push must be credited for withdrawal");
+    assert.equal(credited, expectedShare, "credited amount must equal the independently computed exact floor");
+
+    // The well-behaved EOA co-lender (lenderA, last in the array, and the one
+    // who triggered liquidation) must still be paid its full share by push in
+    // the same transaction, despite rejecting's push failing.
+    const aAfter = await publicClient.getBalance({ address: lenderA.account.address });
+    assert.equal(aAfter - aBefore + gas, seizedAmount - credited);
+
+    // Before withdrawal, the loan contract holds exactly the failed share.
+    assert.equal(await publicClient.getBalance({ address: loanAddress }), credited);
+
+    // Arm the receiver, withdraw, and verify the credit pays out in full.
+    await rejecting.write.setAccept([true], { account: deployer.account });
+    const rBefore = await publicClient.getBalance({ address: rejecting.address });
+    await rejecting.write.withdrawFrom([loanAddress], { account: deployer.account });
+    const rAfter = await publicClient.getBalance({ address: rejecting.address });
+    assert.equal(rAfter - rBefore, credited);
+    assert.equal(await loan.read.pendingWithdrawals([rejecting.address]), 0n);
   });
 });
