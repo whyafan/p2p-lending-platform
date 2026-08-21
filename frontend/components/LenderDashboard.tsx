@@ -28,6 +28,9 @@ type StoredAssessment = {
   contributions: FeatureContribution[];
   source?: string | null;
   personaId?: string | null;
+  modelVersion?: string | null;
+  termSheetCid?: string | null;
+  termSheetHash?: string | null;
 };
 import { ClipboardList, TrendingUp, Check, Hexagon, AlertTriangle } from 'lucide-react';
 
@@ -1283,6 +1286,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                             : 0
                         }
                         assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
+                        borrower={terms.borrower}
                       />
                     </div>
 
@@ -1786,6 +1790,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         myShareFrac={myShareFrac}
                         isLiquidatable={canLiquidate}
                         assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
+                        borrower={terms.borrower}
                       />
                     </div>
 

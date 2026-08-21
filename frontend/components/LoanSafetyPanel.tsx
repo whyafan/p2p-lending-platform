@@ -16,10 +16,13 @@
  */
 
 import { useState } from 'react';
+import { verifyTypedData } from 'viem';
 import type { RiskTier } from '../lib/loan-terms';
 import type { FeatureContribution } from '../lib/risk-explainer';
 import { RISK_TIER_CONFIG, BASE_APR } from '../lib/loan-terms';
 import { formatPercent, formatUsd } from '../lib/format';
+import { termSheetHash } from '../lib/termsheet-canonical';
+import { TERM_SHEET_TYPES, parseMessage, PINATA_GATEWAY } from '../lib/termsheet-typed-data';
 import { ShieldCheck, ChevronDown, AlertTriangle } from 'lucide-react';
 
 type Props = {
@@ -54,6 +57,8 @@ type Props = {
     termSheetCid?: string | null;
     termSheetHash?: string | null;
   } | null;
+  /** This loan's borrower - used to confirm the term-sheet signer matches. */
+  borrower?: string | null;
 };
 
 export function LoanSafetyPanel({
@@ -68,8 +73,56 @@ export function LoanSafetyPanel({
   myShareFrac,
   isLiquidatable,
   assessment,
+  borrower,
 }: Props) {
   const [open, setOpen] = useState(false);
+  type VerifyState = 'idle' | 'checking' | 'verified' | 'mismatch' | 'error';
+  const [verifyState, setVerifyState] = useState<VerifyState>('idle');
+  const [verifyDetail, setVerifyDetail] = useState<string | null>(null);
+
+  async function verifyTermSheet() {
+    if (!assessment?.termSheetCid || !assessment.termSheetHash) return;
+    setVerifyState('checking');
+    setVerifyDetail(null);
+    try {
+      const res = await fetch(`${PINATA_GATEWAY}${assessment.termSheetCid}`, {
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`gateway ${res.status}`);
+      const payload = (await res.json()) as Record<string, unknown>;
+
+      // 1. Content integrity: the fetched document hashes to the stored hash.
+      if (termSheetHash(payload) !== assessment.termSheetHash.toLowerCase()) {
+        setVerifyState('mismatch');
+        setVerifyDetail('The document on IPFS does not match the hash saved at loan creation.');
+        return;
+      }
+
+      // 2. Signature: the signer really signed these terms, and is this loan's borrower.
+      const message = parseMessage(payload.message as Record<string, unknown>);
+      const signer = String(payload.signer ?? '');
+      const sigOk = await verifyTypedData({
+        address: signer as `0x${string}`,
+        domain: payload.domain as { name: string; version: string; chainId: number },
+        types: TERM_SHEET_TYPES,
+        primaryType: 'LoanTermSheet',
+        message,
+        signature: String(payload.signature ?? '') as `0x${string}`,
+      });
+      const isBorrower = !borrower || signer.toLowerCase() === borrower.toLowerCase();
+      if (sigOk && isBorrower) {
+        setVerifyState('verified');
+      } else {
+        setVerifyState('mismatch');
+        setVerifyDetail(sigOk
+          ? 'Signature is valid but the signer is not this loan\'s borrower.'
+          : 'The EIP-712 signature does not verify against the pinned terms.');
+      }
+    } catch {
+      setVerifyState('error');
+      setVerifyDetail('Could not fetch the term sheet from the IPFS gateway. Try again in a moment.');
+    }
+  }
 
   const cfg = tier ? RISK_TIER_CONFIG[tier] : null;
   const maxLtv = maxLtvBps / 10_000;
@@ -258,6 +311,42 @@ export function LoanSafetyPanel({
                   ? <>Scored by ML model <span className="font-mono text-slate-400">{assessment.modelVersion}</span> (LightGBM + SHAP)</>
                   : <>Scored by the rule-based explainable scorer</>}
               </p>
+
+              {assessment.termSheetCid && assessment.termSheetHash && (
+                <div className="mt-2 rounded-lg border border-slate-700/60 bg-slate-900/40 p-2.5 space-y-1.5">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Term sheet anchored on IPFS</p>
+                  <p className="text-[10px] text-slate-500 break-all">
+                    <a
+                      href={`${PINATA_GATEWAY}${assessment.termSheetCid}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-400 hover:underline font-mono"
+                    >
+                      {assessment.termSheetCid}
+                    </a>
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={verifyTermSheet}
+                      disabled={verifyState === 'checking'}
+                      className="rounded-md border border-slate-600 px-2 py-1 text-[10px] font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      {verifyState === 'checking' ? 'Verifying…' : 'Verify hash & signer'}
+                    </button>
+                    {verifyState === 'verified' && (
+                      <span className="text-[10px] font-semibold text-emerald-400">Verified: hash and borrower signature match</span>
+                    )}
+                    {verifyState === 'mismatch' && (
+                      <span className="text-[10px] font-semibold text-red-400">Mismatch</span>
+                    )}
+                    {verifyState === 'error' && (
+                      <span className="text-[10px] font-semibold text-amber-400">Gateway unreachable</span>
+                    )}
+                  </div>
+                  {verifyDetail && <p className="text-[10px] text-slate-500">{verifyDetail}</p>}
+                </div>
+              )}
 
               <div className="space-y-1">
                 {[...assessment.contributions]
