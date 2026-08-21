@@ -9,7 +9,8 @@ import { keccak256, stringToBytes } from 'viem';
 export function canonicalize(value: unknown): string {
   if (typeof value === 'bigint') return JSON.stringify(value.toString());
   if (Array.isArray(value)) {
-    return `[${value.map((v) => canonicalize(v)).join(',')}]`;
+    // JSON.stringify turns undefined array elements into null; match it.
+    return `[${value.map((v) => canonicalize(v) ?? 'null').join(',')}]`;
   }
   if (value !== null && typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)

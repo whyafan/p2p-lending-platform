@@ -25,6 +25,16 @@ describe('canonicalize', () => {
   it('drops undefined object values like JSON.stringify does', () => {
     assert.equal(canonicalize({ a: 1, gone: undefined }), '{"a":1}');
   });
+
+  it('serializes undefined array elements as null like JSON.stringify does', () => {
+    assert.equal(canonicalize([1, undefined, 3]), '[1,null,3]');
+  });
+
+  it('is stable across a JSON round-trip', () => {
+    const payload = { z: { b: 1n, a: [1, 'x', { d: 4, c: '5' }] }, a: true };
+    const once = canonicalize(payload);
+    assert.equal(canonicalize(JSON.parse(once)), once);
+  });
 });
 
 describe('termSheetHash', () => {
