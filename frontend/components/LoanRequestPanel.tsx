@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useEffect } from 'react';
-import { useWriteContract, useWaitForTransactionReceipt, useAccount, useBalance, useSwitchChain, useReadContract } from 'wagmi';
+import { useWriteContract, useWaitForTransactionReceipt, useAccount, useBalance, useSwitchChain, useReadContract, useSignTypedData } from 'wagmi';
 import { parseEther } from 'viem';
 import { decodeLoanCreatedFromReceipt } from '../lib/decode-loan-created.ts';
 import { sepolia, hardhat } from 'wagmi/chains';
@@ -9,6 +9,7 @@ import { BORROWER_PERSONAS, type BorrowerPersona } from '../lib/borrower-persona
 import { scoreFeatureVector, type RiskExplanation, type FeatureVector } from '../lib/risk-explainer';
 import type { OffChainMetadata } from '../lib/borrower-personas';
 import { RISK_TIER_CONFIG, BASE_APR, calculateProtocolLoanTerms, type LoanTermSheet } from '../lib/loan-terms';
+import { TERM_SHEET_TYPES, termSheetDomain, serializeMessage, type TermSheetMessage } from '../lib/termsheet-typed-data';
 import { formatUsd, formatPercent } from '../lib/format';
 import { RiskExplanationPanel } from './RiskExplanationPanel';
 import { storeLoanTx, MAX_OPEN_REQUESTS } from './BorrowerLoansSection';
@@ -452,6 +453,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   }, [riskExpl, termSheet, realWalletEth, ethPrice]);
 
   const { writeContractAsync, isPending: isTxPending } = useWriteContract();
+  const { signTypedDataAsync } = useSignTypedData();
+  const [termSheetPin, setTermSheetPin] = useState<{ cid: string; hash: string } | null>(null);
 
   const { data: txReceipt, isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
     hash: submittedHash,
@@ -499,9 +502,11 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
         source: evalMode === 'persona' ? 'persona' : 'wallet',
         personaId: selectedPersona?.id ?? null,
         modelVersion: evalMode === 'wallet' ? (backendResult?.model_version ?? null) : null,
+        termSheetCid: termSheetPin?.cid ?? null,
+        termSheetHash: termSheetPin?.hash ?? null,
       }),
     }).catch((err) => console.error('[risk-persist]', err));
-  }, [createdLoanContract, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona, backendResult]);
+  }, [createdLoanContract, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona, backendResult, termSheetPin]);
 
   // "What happens next" used to be a static list with `done` hardcoded, so it
   // never moved past step 1 no matter what happened on-chain. Follow the real
@@ -640,6 +645,43 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     setWizardStep(nextMode === 'wallet' && !address ? 0 : 1);
   }
 
+  // Best-effort: sign the term sheet and anchor it on IPFS. Wallet mode only.
+  // A declined signature or failed pin never blocks the loan - we just proceed unanchored.
+  async function signAndPinTermSheet(principalWei: bigint, collateralWei: bigint) {
+    if (evalMode !== 'wallet' || !termSheet || !address) return;
+    try {
+      const message: TermSheetMessage = {
+        borrower: address,
+        principalWei,
+        collateralWei,
+        tenorDays: BigInt(tenorDays),
+        interestBps: BigInt(termSheet.interestBps),
+        maxLtvBps: BigInt(termSheet.maxLtvBps),
+        liquidationBufferBps: BigInt(termSheet.liquidationBufferBps),
+        issuedAt: BigInt(Math.floor(Date.now() / 1000)),
+      };
+      const signature = await signTypedDataAsync({
+        domain: termSheetDomain(chainId),
+        types: TERM_SHEET_TYPES,
+        primaryType: 'LoanTermSheet',
+        message,
+      });
+      const res = await fetch('/api/termsheet/pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chainId, message: serializeMessage(message), signature, signer: address }),
+      });
+      if (res.ok) {
+        const { cid, hash } = (await res.json()) as { cid: string; hash: string };
+        setTermSheetPin({ cid, hash });
+      } else {
+        console.warn('[termsheet] pin failed:', res.status);
+      }
+    } catch (err) {
+      console.warn('[termsheet] signing declined or failed:', err);
+    }
+  }
+
   async function submitLoan() {
     if (!termSheet || !address || !demoTxAmounts) return;
     setTxError(null);
@@ -655,6 +697,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
 
     try {
       await switchChainAsync({ chainId });
+      await signAndPinTermSheet(principalWei, collateralWei);
       const hash = await writeContractAsync({
         address: factoryAddress as `0x${string}`,
         abi: LOAN_FACTORY_ABI,
@@ -687,6 +730,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     setSubmittedHash(undefined);
     setRiskSaved(false);
     setCreatedLoanContract(undefined);
+    setTermSheetPin(null);
     onTierChange?.(null, null);
     onPersonaChange?.(null);
   }
