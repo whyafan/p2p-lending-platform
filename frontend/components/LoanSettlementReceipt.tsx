@@ -19,6 +19,7 @@ import {
   splitSharesByLiquidation,
   sumAmounts,
   unclaimedPendingShares,
+  viewerLedgerEvents,
 } from '../lib/share-math';
 import { ArrowDownLeft, ArrowUpRight, ExternalLink, Receipt } from 'lucide-react';
 
@@ -60,7 +61,6 @@ export function LoanSettlementReceipt({
     (e) => e.kind === 'partial-repayment' || e.kind === 'repaid',
   );
   const liqEvent = events.find((e) => e.kind === 'liquidated');
-  const fundEvent = events.find((e) => e.kind === 'funded');
 
   const totalRepaid = repayEvents.reduce((sum, e) => sum + e.amount, zero);
   const seized = liqEvent?.amount ?? zero;
@@ -107,6 +107,13 @@ export function LoanSettlementReceipt({
     return parseFloat(formatEther(wei)) * p.usd;
   };
   const anyEstimated = events.some((e) => priceFor(e).estimated);
+
+  // Audit trail (I2): the summary rows above are already per-lender once
+  // usePerShare is true, so the trail below must match - otherwise it lists
+  // other lenders' contributions and payouts, unlabelled, alongside this
+  // lender's own totals. Strict (no keepLifecycle), matching the Tax P&L:
+  // this is a per-lender receipt, not a whole-loan history.
+  const auditEvents = role === 'lender' ? viewerLedgerEvents(events, viewerAddress) : events;
 
   const rows =
     role === 'lender'
@@ -192,17 +199,19 @@ export function LoanSettlementReceipt({
         <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-1">
           Every transaction
         </p>
-        {events.length === 0 ? (
+        {auditEvents.length === 0 ? (
           <p className="text-[10px] text-slate-700">
             No events indexed yet — they appear once the history loads.
           </p>
         ) : (
-          events.map((e) => {
+          auditEvents.map((e, idx) => {
             const inbound = !OUTBOUND_KINDS[role].includes(e.kind);
             const usd = usdOf(e.amount, e);
             return (
               <div
-                key={`${e.txHash}-${e.kind}`}
+                // Index included: N share-distributed rows from one tx (one
+                // per lender) otherwise collide on txHash+kind alone.
+                key={`${e.txHash}-${e.kind}-${idx}`}
                 className="flex items-center gap-2 text-[11px]"
               >
                 {inbound ? (
@@ -210,7 +219,10 @@ export function LoanSettlementReceipt({
                 ) : (
                   <ArrowUpRight className="h-3 w-3 text-amber-400 flex-shrink-0" />
                 )}
-                <span className="text-slate-400">{EVENT_LABEL[e.kind]}</span>
+                <span className="text-slate-400">
+                  {EVENT_LABEL[e.kind]}
+                  {e.kind === 'share-distributed' && e.pending && ' (pending)'}
+                </span>
                 <span className="font-mono text-slate-300">{eth(e.amount)} ETH</span>
                 {usd !== null && <span className="text-slate-600">({formatUsd(usd)})</span>}
                 {e.kind === 'liquidated' && e.refunded !== undefined && e.refunded > zero && (

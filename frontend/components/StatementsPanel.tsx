@@ -14,7 +14,7 @@ import { useAccount, useReadContract, useReadContracts } from 'wagmi';
 import { sepolia } from 'wagmi/chains';
 import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
 import { useLoanEvents } from '../hooks/useLoanEvents';
-import { distinctShareActors } from '../lib/share-math';
+import { distinctLenderActors } from '../lib/share-math';
 import {
   generatePnl,
   generateTaxPnl,
@@ -196,6 +196,10 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
         // actual lender count below once this loan's events are indexed.
         counterparty: role === 'borrower' ? 'pooled' : t.borrower,
         createdAt: Number(t.createdAt),
+        // Contract-read contribution (C1): survives the reporting period
+        // filter applied to `events` below, unlike summing contribution
+        // events would.
+        myContribution: contribution,
       });
     });
     return out;
@@ -230,7 +234,7 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
       // this loan's ShareDistributed events have been indexed.
       let counterparty = l.counterparty;
       if (role === 'borrower') {
-        const n = distinctShareActors(events).length;
+        const n = distinctLenderActors(events).length;
         counterparty = n > 0 ? `${n} lender${n === 1 ? '' : 's'}` : l.counterparty;
       }
       return { ...l, events, counterparty };
