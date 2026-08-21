@@ -39,6 +39,9 @@ class CreditScorer:
             self._labels   = {0: "A", 1: "B", 2: "C"}
             self._explainer = None
 
+        from .meta import load_meta
+        self._meta = load_meta() if self._ready else None
+
     @classmethod
     def get(cls) -> "CreditScorer":
         if cls._instance is None:
@@ -48,6 +51,10 @@ class CreditScorer:
     @property
     def ready(self) -> bool:
         return self._ready
+
+    @property
+    def version(self) -> str | None:
+        return self._meta["version"] if (self._ready and self._meta) else None
 
     def score(
         self,
@@ -116,6 +123,7 @@ class CreditScorer:
             "confidence":    round(confidence, 4),
             "contributions": contributions,
             "fallback_used": fallback_used,
+            "model_version": self.version,
         }
 
 

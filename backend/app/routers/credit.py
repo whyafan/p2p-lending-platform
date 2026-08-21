@@ -151,4 +151,5 @@ async def score_borrower(req: ScoreRequest) -> ScoreResponse:
         contributions = contributions,
         warnings      = warnings,
         fallback_used = result["fallback_used"],
+        model_version = result.get("model_version"),
     )

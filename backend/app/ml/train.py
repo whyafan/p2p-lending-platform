@@ -179,6 +179,10 @@ def train_and_save(n_per_tier: int = 1000) -> None:
     print(f"  Saved model → {model_path}")
     print(f"  Saved label map → {label_path}")
 
+    from .meta import stamp_meta
+    meta = stamp_meta(n_samples=len(X_train) + len(X_val), params=params)
+    print(f"  Stamped model meta → version {meta['version']}")
+
 
 if __name__ == "__main__":
     train_and_save()
