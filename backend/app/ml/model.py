@@ -54,7 +54,13 @@ class CreditScorer:
 
     @property
     def version(self) -> str | None:
-        return self._meta["version"] if (self._ready and self._meta) else None
+        if not (self._ready and self._meta):
+            return None
+        try:
+            from .meta import model_version
+            return self._meta["version"] if self._meta.get("version") == model_version() else None
+        except OSError:
+            return None
 
     def score(
         self,
