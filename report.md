@@ -26,13 +26,13 @@ Layer 4 (UI)         Next.js dashboard (app/app/page.tsx): role toggle, borrower
 
 Off-chain: Supabase (auth, KYC, risk-assessment snapshots, per-event price snapshots), Didit KYC, optional FastAPI credit scorer.
 
-## Deployed contracts (Sepolia, redeployed 2026-07-26)
+## Deployed contracts (Sepolia, redeployed 2026-08-21 for multi-lender pooling)
 
 | Contract | Address |
 |---|---|
-| LoanFactory | `0x4dDB469155A8824FDCa64d2e706aFE6380C55fAd` |
-| CollateralVault | `0xeB137a592E5623D2750CEcf4Ad8421E2aA8FDf16` |
-| MockPriceFeed | `0x5094c61F27B8b7538eeC330f9Ec013277E590a7c` |
+| LoanFactory | `0x0e3ea8f226434feadb267d05c9c4ef8f951c7d00` |
+| CollateralVault | `0x084a1b982ac01cae891417dea52b27b0e2b79a0f` |
+| MockPriceFeed | `0x43a39f432e38a7665db04a536c4d19460331bb6f` |
 
 All three are populated in `frontend/.env`. Source-verified on Blockscout and Sourcify (earlier factory address).
 
