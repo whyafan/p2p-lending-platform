@@ -36,6 +36,17 @@ def test_scorer_returns_model_version():
     assert result["model_version"] == load_meta()["version"]
 
 
+def test_corrupted_meta_is_treated_as_missing():
+    good = open(META_PATH, encoding="utf-8").read()
+    try:
+        with open(META_PATH, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        assert load_meta() is None
+    finally:
+        with open(META_PATH, "w", encoding="utf-8") as f:
+            f.write(good)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

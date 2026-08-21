@@ -36,10 +36,11 @@ def stamp_meta(n_samples: int | None = None, params: dict | None = None) -> dict
 
 
 def load_meta() -> dict | None:
-    if not os.path.exists(META_PATH):
+    try:
+        with open(META_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
         return None
-    with open(META_PATH, encoding="utf-8") as f:
-        return json.load(f)
 
 
 if __name__ == "__main__":
