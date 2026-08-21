@@ -108,9 +108,10 @@ Track F manual browser verification (`tests/MANUAL_TEST_PLAN.md`, needs two acco
   assessment, and lenders can fetch, re-hash, and verify the signer from the safety panel.
   Best-effort: declined signature or failed pin never blocks loan creation. Persona/demo
   loans do not sign or pin.
-  Verification proves the borrower signed a term sheet matching this loan's on-chain terms;
-  because signing happens before the loan contract exists, the CID-to-loan binding itself
-  lives in the off-chain assessment row, not on-chain.
+  Verification proves the borrower signed a term sheet matching this loan's rate, LTV,
+  buffer, and tenor (amounts are excluded because demo transaction amounts diverge from
+  displayed figures); because signing happens before the loan contract exists, the
+  CID-to-loan binding itself lives in the off-chain assessment row, not on-chain.
 - **Manual setup**: (1) run migration `006_model_version_and_termsheets.sql` in the Supabase
   SQL editor - this must happen BEFORE deploying the new frontend, since the risk route
   selects these columns unconditionally and a pre-migration schema 500s on every read/write;

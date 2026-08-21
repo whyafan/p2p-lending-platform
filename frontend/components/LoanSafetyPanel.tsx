@@ -101,49 +101,54 @@ export function LoanSafetyPanel({
         return;
       }
 
-      // 2. Signature: the signer really signed these terms, and is this loan's borrower.
-      const message = parseMessage(payload.message as Record<string, unknown>);
-      const signer = String(payload.signer ?? '');
-      const sigOk = await verifyTypedData({
-        address: signer as `0x${string}`,
-        domain: payload.domain as { name: string; version: string; chainId: number },
-        types: TERM_SHEET_TYPES,
-        primaryType: 'LoanTermSheet',
-        message,
-        signature: String(payload.signature ?? '') as `0x${string}`,
-      });
-      const isBorrower = !borrower || signer.toLowerCase() === borrower.toLowerCase();
+      try {
+        // 2. Signature: the signer really signed these terms, and is this loan's borrower.
+        const message = parseMessage(payload.message as Record<string, unknown>);
+        const signer = String(payload.signer ?? '');
+        const sigOk = await verifyTypedData({
+          address: signer as `0x${string}`,
+          domain: payload.domain as { name: string; version: string; chainId: number },
+          types: TERM_SHEET_TYPES,
+          primaryType: 'LoanTermSheet',
+          message,
+          signature: String(payload.signature ?? '') as `0x${string}`,
+        });
+        const isBorrower = !borrower || signer.toLowerCase() === borrower.toLowerCase();
 
-      // 3. Domain and standard: the pinned document really is a NexusFi term sheet
-      // for this chain, not some other signed payload that happens to hash clean.
-      const domain = payload.domain as { name?: string; version?: string; chainId?: number };
-      const domainOk =
-        payload.standard === 'NexusFi-TermSheet-v1' &&
-        domain?.name === 'NexusFi' &&
-        domain?.version === '1' &&
-        (chainId === undefined || domain?.chainId === chainId);
+        // 3. Domain and standard: the pinned document really is a NexusFi term sheet
+        // for this chain, not some other signed payload that happens to hash clean.
+        const domain = payload.domain as { name?: string; version?: string; chainId?: number };
+        const domainOk =
+          payload.standard === 'NexusFi-TermSheet-v1' &&
+          domain?.name === 'NexusFi' &&
+          domain?.version === '1' &&
+          (chainId === undefined || domain?.chainId === chainId);
 
-      // 4. Terms: the signed terms are actually this loan's on-chain terms, not
-      // just any validly-signed term sheet.
-      const termsOk =
-        Number(message.interestBps) === interestBps &&
-        Number(message.maxLtvBps) === maxLtvBps &&
-        Number(message.liquidationBufferBps) === liquidationBufferBps &&
-        Number(message.tenorDays) === durationDays;
+        // 4. Terms: the signed terms are actually this loan's on-chain terms, not
+        // just any validly-signed term sheet.
+        const termsOk =
+          Number(message.interestBps) === interestBps &&
+          Number(message.maxLtvBps) === maxLtvBps &&
+          Number(message.liquidationBufferBps) === liquidationBufferBps &&
+          Number(message.tenorDays) === durationDays;
 
-      if (sigOk && isBorrower && domainOk && termsOk) {
-        setVerifyState('verified');
-      } else {
+        if (sigOk && isBorrower && domainOk && termsOk) {
+          setVerifyState('verified');
+        } else {
+          setVerifyState('mismatch');
+          setVerifyDetail(
+            !sigOk
+              ? 'The EIP-712 signature does not verify against the pinned terms.'
+              : !isBorrower
+                ? 'Signature is valid but the signer is not this loan\'s borrower.'
+                : !domainOk
+                  ? 'The pinned document\'s domain or standard is not a NexusFi term sheet.'
+                  : 'The pinned terms do not match this loan\'s on-chain terms.',
+          );
+        }
+      } catch {
         setVerifyState('mismatch');
-        setVerifyDetail(
-          !sigOk
-            ? 'The EIP-712 signature does not verify against the pinned terms.'
-            : !isBorrower
-              ? 'Signature is valid but the signer is not this loan\'s borrower.'
-              : !domainOk
-                ? 'The pinned document\'s domain or standard is not a NexusFi term sheet.'
-                : 'The pinned terms do not match this loan\'s on-chain terms.',
-        );
+        setVerifyDetail('The pinned document is not a structurally valid signed term sheet.');
       }
     } catch {
       setVerifyState('error');
