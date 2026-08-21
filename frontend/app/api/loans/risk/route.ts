@@ -78,8 +78,8 @@ export async function POST(req: Request) {
     source: typeof source === 'string' ? source : null,
     persona_id: typeof personaId === 'string' ? personaId : null,
     model_version: typeof modelVersion === 'string' ? modelVersion : null,
-    term_sheet_cid: typeof termSheetCid === 'string' ? termSheetCid : null,
-    term_sheet_hash: typeof termSheetHash === 'string' ? termSheetHash : null,
+    term_sheet_cid: typeof termSheetCid === 'string' && /^[A-Za-z0-9]{46,62}$/.test(termSheetCid) ? termSheetCid : null,
+    term_sheet_hash: typeof termSheetHash === 'string' && /^0x[0-9a-f]{64}$/.test(termSheetHash) ? termSheetHash : null,
     created_by: session.profile.id,
   });
 

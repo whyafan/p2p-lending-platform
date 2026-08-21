@@ -1287,6 +1287,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         }
                         assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
                         borrower={terms.borrower}
+                        chainId={chainId}
                       />
                     </div>
 
@@ -1791,6 +1792,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         isLiquidatable={canLiquidate}
                         assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
                         borrower={terms.borrower}
+                        chainId={chainId}
                       />
                     </div>
 

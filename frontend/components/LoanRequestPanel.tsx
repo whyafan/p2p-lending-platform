@@ -502,8 +502,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
         source: evalMode === 'persona' ? 'persona' : 'wallet',
         personaId: selectedPersona?.id ?? null,
         modelVersion: evalMode === 'wallet' ? (backendResult?.model_version ?? null) : null,
-        termSheetCid: termSheetPin?.cid ?? null,
-        termSheetHash: termSheetPin?.hash ?? null,
+        termSheetCid: evalMode === 'wallet' ? (termSheetPin?.cid ?? null) : null,
+        termSheetHash: evalMode === 'wallet' ? (termSheetPin?.hash ?? null) : null,
       }),
     }).catch((err) => console.error('[risk-persist]', err));
   }, [createdLoanContract, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona, backendResult, termSheetPin]);
@@ -683,6 +683,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   }
 
   async function submitLoan() {
+    setTermSheetPin(null);
     if (!termSheet || !address || !demoTxAmounts) return;
     setTxError(null);
 

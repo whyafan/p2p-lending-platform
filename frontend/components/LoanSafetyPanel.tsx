@@ -59,6 +59,8 @@ type Props = {
   } | null;
   /** This loan's borrower - used to confirm the term-sheet signer matches. */
   borrower?: string | null;
+  /** Chain the loan lives on - used to confirm the pinned domain matches. */
+  chainId?: number;
 };
 
 export function LoanSafetyPanel({
@@ -74,6 +76,7 @@ export function LoanSafetyPanel({
   isLiquidatable,
   assessment,
   borrower,
+  chainId,
 }: Props) {
   const [open, setOpen] = useState(false);
   type VerifyState = 'idle' | 'checking' | 'verified' | 'mismatch' | 'error';
@@ -110,13 +113,37 @@ export function LoanSafetyPanel({
         signature: String(payload.signature ?? '') as `0x${string}`,
       });
       const isBorrower = !borrower || signer.toLowerCase() === borrower.toLowerCase();
-      if (sigOk && isBorrower) {
+
+      // 3. Domain and standard: the pinned document really is a NexusFi term sheet
+      // for this chain, not some other signed payload that happens to hash clean.
+      const domain = payload.domain as { name?: string; version?: string; chainId?: number };
+      const domainOk =
+        payload.standard === 'NexusFi-TermSheet-v1' &&
+        domain?.name === 'NexusFi' &&
+        domain?.version === '1' &&
+        (chainId === undefined || domain?.chainId === chainId);
+
+      // 4. Terms: the signed terms are actually this loan's on-chain terms, not
+      // just any validly-signed term sheet.
+      const termsOk =
+        Number(message.interestBps) === interestBps &&
+        Number(message.maxLtvBps) === maxLtvBps &&
+        Number(message.liquidationBufferBps) === liquidationBufferBps &&
+        Number(message.tenorDays) === durationDays;
+
+      if (sigOk && isBorrower && domainOk && termsOk) {
         setVerifyState('verified');
       } else {
         setVerifyState('mismatch');
-        setVerifyDetail(sigOk
-          ? 'Signature is valid but the signer is not this loan\'s borrower.'
-          : 'The EIP-712 signature does not verify against the pinned terms.');
+        setVerifyDetail(
+          !sigOk
+            ? 'The EIP-712 signature does not verify against the pinned terms.'
+            : !isBorrower
+              ? 'Signature is valid but the signer is not this loan\'s borrower.'
+              : !domainOk
+                ? 'The pinned document\'s domain or standard is not a NexusFi term sheet.'
+                : 'The pinned terms do not match this loan\'s on-chain terms.',
+        );
       }
     } catch {
       setVerifyState('error');
@@ -341,7 +368,7 @@ export function LoanSafetyPanel({
                       <span className="text-[10px] font-semibold text-red-400">Mismatch</span>
                     )}
                     {verifyState === 'error' && (
-                      <span className="text-[10px] font-semibold text-amber-400">Gateway unreachable</span>
+                      <span className="text-[10px] font-semibold text-amber-400">Could not verify</span>
                     )}
                   </div>
                   {verifyDetail && <p className="text-[10px] text-slate-500">{verifyDetail}</p>}

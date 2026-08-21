@@ -10,7 +10,7 @@ import { NextResponse } from 'next/server';
 import { verifyTypedData } from 'viem';
 import { getSessionUser } from '../../../../lib/auth';
 import { termSheetHash } from '../../../../lib/termsheet-canonical';
-import { TERM_SHEET_TYPES, termSheetDomain, parseMessage } from '../../../../lib/termsheet-typed-data';
+import { TERM_SHEET_TYPES, termSheetDomain, parseMessage, serializeMessage, type TermSheetMessage } from '../../../../lib/termsheet-typed-data';
 
 export async function POST(req: Request) {
   const session = await getSessionUser();
@@ -39,6 +39,13 @@ export async function POST(req: Request) {
   }
 
   // The signature must actually be the signer's, over exactly this message.
+  let parsedMessage: TermSheetMessage;
+  try {
+    parsedMessage = parseMessage(message as Record<string, unknown>);
+  } catch {
+    return NextResponse.json({ error: 'Malformed message' }, { status: 400 });
+  }
+
   let valid = false;
   try {
     valid = await verifyTypedData({
@@ -46,7 +53,7 @@ export async function POST(req: Request) {
       domain: termSheetDomain(chainId),
       types: TERM_SHEET_TYPES,
       primaryType: 'LoanTermSheet',
-      message: parseMessage(message as Record<string, unknown>),
+      message: parsedMessage,
       signature: signature as `0x${string}`,
     });
   } catch {
@@ -56,14 +63,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Signature does not verify' }, { status: 400 });
   }
 
-  // Pin the exact payload we hash. serialized message only - no bigints in JSON.
+  // Pin the exact payload we hash. Only the 8 typed fields - reserialized from the
+  // verified parse, so no extra unsigned keys the client sent along ever get pinned.
   const payload = {
     standard: 'NexusFi-TermSheet-v1',
     chainId,
     domain: termSheetDomain(chainId),
     primaryType: 'LoanTermSheet',
     types: TERM_SHEET_TYPES,
-    message,
+    message: serializeMessage(parsedMessage),
     signature,
     signer: signer.toLowerCase(),
   };
