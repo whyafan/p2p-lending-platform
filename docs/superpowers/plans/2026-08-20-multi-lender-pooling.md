@@ -16,7 +16,7 @@
 - No new npm dependencies, contracts or frontend.
 - Frontend: relative imports inside `lib/` carry explicit `.ts` extensions; imports from `app/` or `components/` into `lib/` do not.
 - Contract test conventions: `node:test` + `assert/strict`, `const { viem, networkHelpers } = await network.connect()`, `viem.assertions.emit(...)` / `viem.assertions.revertWith(...)`, and the timing caveat documented in `contracts/test/LoanLifecycle.ts` lines 83-90: never assert against pre-computed time-sensitive "owed" figures; read authoritative state after each tx.
-- Spec constants, verbatim: `MAX_LENDERS = 10`; minimum contribution = `principalAmount / 100` (floor 1 wei), applied per `contribute()` call, top-ups included; rounding dust goes to the last lender in the contributors array; `liquidate()` callable by any contributor; `fastForward` gate = borrower or any contributor.
+- Spec constants, verbatim: `MAX_LENDERS = 10`; minimum contribution = `principalAmount / 100` (floor 1 wei), applied per `contribute()` call, top-ups included; rounding dust goes to the last lender in the contributors array; `liquidate()` callable by any contributor; `fastForward` gate is status-dependent - borrower-only while `Requested`, borrower or any contributor once `Funded` (corrected in commit `ae3a445` after review found that a contributor able to rewind the funding window can brick an open request for the cost of gas).
 
 ---
 
@@ -978,14 +978,22 @@ it("rejects plain ETH transfers from anyone but the vault", async function () {
   );
 });
 
-it("a non-participant cannot fastForward; any contributor can", async function () {
+it("once Funded, any contributor may fastForward but a stranger may not", async function () {
+  // The gate is status-dependent (see commit ae3a445): borrower-only while
+  // Requested, borrower-or-contributor once Funded. This covers the Funded
+  // branch; MultiLenderFunding.ts covers the Requested branch.
   const { loan } = await deployRequestedLoan();
-  await loan.write.contribute({ account: lenderA.account, value: parseEther("0.5") });
+  await loan.write.contribute({ account: lenderA.account, value: parseEther("0.6") });
+  await loan.write.contribute({ account: lenderB.account, value: parseEther("0.4") });
+  assert.equal(await loan.read.status(), 1); // Funded
+
+  // deployer contributed nothing to this loan
   await viem.assertions.revertWith(
-    loan.write.fastForward([DAY], { account: lenderB.account }),
+    loan.write.fastForward([DAY], { account: deployer.account }),
     "Loan: not a participant",
   );
-  await loan.write.fastForward([DAY], { account: lenderA.account }); // must not revert
+  await loan.write.fastForward([DAY], { account: lenderA.account }); // contributor: must not revert
+  await loan.write.fastForward([DAY], { account: borrower.account }); // borrower: must not revert
 });
 ```
 

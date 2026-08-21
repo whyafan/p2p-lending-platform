@@ -65,7 +65,15 @@ No refund loops; each contributor reclaims their own.
 
 ### Misc
 
-- `fastForward`'s participant gate extends from `borrower || lender` to `borrower || any contributor`.
+- `fastForward`'s participant gate becomes status-dependent.
+While `Funded`, it extends from `borrower || lender` to `borrower || any contributor`, so a pooled loan's demo liquidation does not depend on one specific person.
+While `Requested`, it stays **borrower-only**.
+
+This last part corrects an earlier draft of this spec, which widened the gate for both statuses.
+A review of the Task 1 implementation found the attack that opens: a contributor sends the 1% minimum, calls `fastForward(8 days)` to push the loan past its funding window, then calls `reclaimContribution()` to take the 1% back in the same block.
+Because `requestedAt` only ever decreases, expiry is monotonic, so the loan is permanently unfundable; every other contributor's escrow is stranded until each individually reclaims, and the borrower must cancel and re-list.
+Total attacker cost is gas.
+Restricting the `Requested` branch to the borrower closes it completely and costs nothing, since no demo needs a lender to expire someone else's funding window.
 - `withdraw()` pays out `pendingWithdrawals[msg.sender]` (from failed pushes) and is callable regardless of loan status.
 
 ## On-chain interface (what the frontend reads)
