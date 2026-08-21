@@ -82,13 +82,20 @@ export function LoanSettlementReceipt({
   if (usePerShare) {
     const mine = myShareEvents(events, viewerAddress as string);
     const { seizureShares, repaymentShares } = splitSharesByLiquidation(mine, liqEvent?.txHash);
+    // Prefer the contribution prop over the loan-wide principal even here:
+    // during event-indexing lag a pooled lender otherwise sees the full
+    // principal as "You lent" the moment usePerShare flips true.
     myLent = myContribution ?? principal;
     myRepaidShare = sumAmounts(repaymentShares);
     mySeized = sumAmounts(seizureShares);
     myReceived = myRepaidShare + mySeized; // includes pending shares - still owed either way
     pendingUnclaimed = unclaimedPendingShares(events, viewerAddress as string);
   } else {
-    myLent = principal;
+    // No per-share data yet (indexing lag, or a pre-pooling loan). myContribution
+    // is still the best-known figure for a pooled lender when it's present -
+    // falling straight to the loan-wide principal here showed the full pool's
+    // principal as "You lent" during that gap.
+    myLent = myContribution ?? principal;
     myRepaidShare = totalRepaid;
     mySeized = seized;
     myReceived = totalRepaid + seized;
@@ -108,12 +115,28 @@ export function LoanSettlementReceipt({
   };
   const anyEstimated = events.some((e) => priceFor(e).estimated);
 
-  // Audit trail (I2): the summary rows above are already per-lender once
-  // usePerShare is true, so the trail below must match - otherwise it lists
-  // other lenders' contributions and payouts, unlabelled, alongside this
-  // lender's own totals. Strict (no keepLifecycle), matching the Tax P&L:
-  // this is a per-lender receipt, not a whole-loan history.
-  const auditEvents = role === 'lender' ? viewerLedgerEvents(events, viewerAddress) : events;
+  // Audit trail. For a lender (I2): the summary rows above are already
+  // per-lender once usePerShare is true, so the trail below must match -
+  // otherwise it lists other lenders' contributions and payouts, unlabelled,
+  // alongside this lender's own totals. Strict (no keepLifecycle), matching
+  // the Tax P&L: this is a per-lender receipt, not a whole-loan history.
+  //
+  // For a borrower: the only money a borrower ever receives is the loan
+  // principal, and the only money they ever send is a repayment - every
+  // individual contribution/share-distributed/withdrawal/reclaimed row
+  // belongs to some lender's own accounting inside the pool, not the
+  // borrower's. Passing the unfiltered event list here (as before) rendered
+  // every lender's contribution and every lender's payout with the same
+  // outbound arrow used for the borrower's own repayment - a 2-lender repaid
+  // loan's trail read as roughly double the amount the summary above it
+  // correctly showed. viewerLedgerEvents with keepLifecycle:true keeps the
+  // loan-level lifecycle events (funded/repaid/liquidated - the borrower's
+  // own inflow/outflow) while dropping every other lender's individual rows,
+  // since those never match the borrower's own address.
+  const auditEvents =
+    role === 'lender'
+      ? viewerLedgerEvents(events, viewerAddress)
+      : viewerLedgerEvents(events, viewerAddress, { keepLifecycle: true });
 
   const rows =
     role === 'lender'

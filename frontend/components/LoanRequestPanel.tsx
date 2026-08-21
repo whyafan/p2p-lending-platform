@@ -1243,10 +1243,11 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                             Icon: funded ? Check : Clock,
                             done: funded,
                             label: funded ? 'Lenders funded your request' : 'Awaiting lenders (up to 7 days)',
-                            desc:
-                              st === 0
-                                ? `${fundedPct.toFixed(0)}% funded - lenders can each fund part of the ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH`
-                                : `Lenders sent ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH to fund your request`,
+                            desc: funded
+                              ? `Lenders sent ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH to fund your request`
+                              : st === 3
+                              ? 'Request was cancelled before it was funded'
+                              : `${fundedPct.toFixed(0)}% funded - lenders can each fund part of the ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH`,
                           },
                           { Icon: Check, done: funded, label: 'You receive the principal', desc: `${demoTxAmounts.actualPrincipal.toFixed(6)} ETH sent to your wallet` },
                           { Icon: ShieldCheck, done: closed, label: 'Repay to unlock collateral', desc: liquidated ? 'Loan was liquidated - collateral was split among your lenders' : `Repay within ${tenorDays} days to get your ETH back` },

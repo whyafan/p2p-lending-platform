@@ -155,7 +155,7 @@ function scoreWalletAge(days: number): Omit<FeatureContribution, 'weight'> {
         ? 'Long-standing wallet signals consistent on-chain presence'
         : days >= 90
         ? 'Some history but relatively new wallet'
-        : 'New wallet — high uncertainty for lender',
+        : 'New wallet — high uncertainty for lenders',
   };
 }
 

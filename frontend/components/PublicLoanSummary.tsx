@@ -12,10 +12,17 @@ const POLL_MS = 5_000;
 // loan whose funding window has passed will never actually fund (contribute()
 // reverts on-chain), but nothing moves its status off Requested, so it has
 // to be filtered out client-side the same way LenderDashboard does.
+//
+// Gated on requestedAt, not createdAt: createdAt is written once by the
+// factory and never changes, while requestedAt is what the demo's
+// fastForward() rewinds to simulate time passing (Loan.sol gates contribute()
+// on requestedAt + FUNDING_WINDOW, not createdAt). undefined means the read
+// hasn't resolved yet - treated as "not expired" rather than guessing.
 const FUNDING_WINDOW_SECS = 7 * 24 * 60 * 60;
 
-function isExpired(createdAt: bigint): boolean {
-  const deadline = Number(createdAt) + FUNDING_WINDOW_SECS;
+function isExpired(requestedAt: bigint | undefined): boolean {
+  if (requestedAt === undefined) return false;
+  const deadline = Number(requestedAt) + FUNDING_WINDOW_SECS;
   return Math.floor(Date.now() / 1000) > deadline;
 }
 
@@ -115,6 +122,14 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
     [loanContractAddresses, chainId, targetAddress],
   );
 
+  const requestedAtContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'requestedAt' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+
   const { data: statusResults } = useReadContracts({
     contracts: statusContracts,
     query: { enabled: statusContracts.length > 0, refetchInterval: POLL_MS },
@@ -123,6 +138,11 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
   const { data: lenderResults } = useReadContracts({
     contracts: lenderContracts,
     query: { enabled: lenderContracts.length > 0, refetchInterval: POLL_MS },
+  });
+
+  const { data: requestedAtResults } = useReadContracts({
+    contracts: requestedAtContracts,
+    query: { enabled: requestedAtContracts.length > 0, refetchInterval: POLL_MS },
   });
 
   // Address-keyed maps so statusResults/lenderResults indices never drift
@@ -145,6 +165,15 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
     return map;
   }, [lenderContracts, lenderResults]);
 
+  const requestedAtByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    requestedAtContracts.forEach((c, i) => {
+      const r = requestedAtResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [requestedAtContracts, requestedAtResults]);
+
   const matchingLoans = useMemo(() => {
     if (!loanIds || !termsResults) return [];
     const wantedStatus = mode === 'borrower' ? 0 : 1;
@@ -155,27 +184,31 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
         const terms = r.result as LoanTermsTuple;
         const addrKey = terms.loanContract.toLowerCase();
         if (statusByAddress.get(addrKey) !== wantedStatus) return null;
+        let contribution: bigint | undefined;
         if (mode === 'borrower') {
           if (terms.borrower.toLowerCase() !== targetAddress.toLowerCase()) return null;
-          if (isExpired(terms.createdAt)) return null;
+          if (isExpired(requestedAtByAddress.get(addrKey))) return null;
         } else {
-          const contribution = lenderByAddress.get(addrKey);
+          contribution = lenderByAddress.get(addrKey);
           if (!contribution || contribution <= 0n) return null;
         }
-        return { id, terms };
+        return { id, terms, contribution };
       })
-      .filter((l): l is { id: bigint; terms: LoanTermsTuple } => l !== null);
-  }, [loanIds, termsResults, statusByAddress, lenderByAddress, mode, targetAddress]);
+      .filter(
+        (l): l is { id: bigint; terms: LoanTermsTuple; contribution: bigint | undefined } => l !== null,
+      );
+  }, [loanIds, termsResults, statusByAddress, lenderByAddress, requestedAtByAddress, mode, targetAddress]);
 
   // idsLoading/termsLoading alone cover only the first two read rounds. The
-  // status/lender round only starts once loanContractAddresses is populated
-  // (its query is `enabled` on contracts.length > 0), so without also
-  // waiting on it here, the component would render "No open requests." for
-  // one extra RPC round trip on every load, right as matchingLoans becomes
-  // computable off of not-yet-loaded status/lender data.
+  // status/lender/requestedAt round only starts once loanContractAddresses is
+  // populated (its query is `enabled` on contracts.length > 0), so without
+  // also waiting on it here, the component would render "No open requests."
+  // for one extra RPC round trip on every load, right as matchingLoans
+  // becomes computable off of not-yet-loaded data.
   const statusLoading = statusContracts.length > 0 && statusResults === undefined;
   const lenderLoading = lenderContracts.length > 0 && lenderResults === undefined;
-  const isLoading = idsLoading || termsLoading || statusLoading || lenderLoading;
+  const requestedAtLoading = requestedAtContracts.length > 0 && requestedAtResults === undefined;
+  const isLoading = idsLoading || termsLoading || statusLoading || lenderLoading || requestedAtLoading;
 
   if (!isDeployed) {
     return <p className="text-xs text-slate-600">Contracts not configured.</p>;
@@ -195,12 +228,18 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
 
   return (
     <div className="space-y-2">
-      {matchingLoans.map(({ id, terms }) => {
+      {matchingLoans.map(({ id, terms, contribution }) => {
         const principalEth = parseFloat(formatEther(terms.principalAmount));
         const collateralEth = parseFloat(formatEther(terms.collateralAmount));
-        const principalUsd = ethPrice > 0 ? principalEth * ethPrice : null;
         const aprPct = Number(terms.interestBps) / 10_000;
         const maxLtvPct = Number(terms.maxLtvBps) / 10_000;
+
+        // Lender mode: this is a pooled loan, so the loan's full principal is
+        // never this one address's position - up to 10 lenders can each hold
+        // a slice of the same loan. Show what they actually put in.
+        const displayWei = mode === 'lender' ? contribution ?? 0n : terms.principalAmount;
+        const displayEth = parseFloat(formatEther(displayWei));
+        const displayUsd = ethPrice > 0 ? displayEth * ethPrice : null;
 
         return (
           <div
@@ -214,11 +253,16 @@ export function PublicLoanSummary({ mode, targetAddress, factoryAddress, chainId
               </span>
             </div>
             <p className="text-sm font-mono font-bold text-white">
-              {principalEth.toFixed(4)} ETH
-              {principalUsd !== null && (
-                <span className="text-slate-500 font-normal"> ({formatUsd(principalUsd)})</span>
+              {displayEth.toFixed(4)} ETH
+              {displayUsd !== null && (
+                <span className="text-slate-500 font-normal"> ({formatUsd(displayUsd)})</span>
               )}
             </p>
+            {mode === 'lender' && (
+              <p className="text-[10px] text-slate-600">
+                their contribution, of {principalEth.toFixed(4)} ETH principal
+              </p>
+            )}
             <p className="text-[11px] text-slate-500">
               {formatPercent(aprPct)} APR, {Number(terms.durationDays)}d term, max {formatPercent(maxLtvPct)} LTV, {collateralEth.toFixed(4)} ETH collateral
             </p>

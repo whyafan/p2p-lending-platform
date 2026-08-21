@@ -123,8 +123,16 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
   const [repayErrorLoanId, setRepayErrorLoanId] = useState<bigint | null>(null);
   const [repayAmountInputs, setRepayAmountInputs] = useState<Record<string, string>>({});
 
+  const [cancelingLoanId, setCancelingLoanId] = useState<bigint | null>(null);
+  const [cancelHash, setCancelHash] = useState<`0x${string}` | undefined>(undefined);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [cancelErrorLoanId, setCancelErrorLoanId] = useState<bigint | null>(null);
+
   const { isLoading: isRepayConfirming, isSuccess: isRepayConfirmed } = useWaitForTransactionReceipt({
     hash: repayHash,
+  });
+  const { isLoading: isCancelConfirming, isSuccess: isCancelConfirmed } = useWaitForTransactionReceipt({
+    hash: cancelHash,
   });
 
   const isDeployed = Boolean(
@@ -428,6 +436,11 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
     if (isRepayConfirmed) void refetchAll();
   }, [isRepayConfirmed]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Immediately refresh contract state after a confirmed cancel
+  useEffect(() => {
+    if (isCancelConfirmed) void refetchAll();
+  }, [isCancelConfirmed]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Sends `amountWei` toward a loan's live outstanding balance. Overpaying is
   // safe — the contract caps what it applies and refunds the rest in the same
   // transaction, which is how the "repay in full" quick action guarantees
@@ -453,6 +466,34 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
       setRepayError(msg.length > 160 ? msg.slice(0, 157) + '…' : msg);
       setRepayErrorLoanId(loanId);
       setRepayingLoanId(null);
+    }
+  }
+
+  // cancel() is borrower-only and Requested-only on-chain (Loan.sol), gated
+  // the same way here: only offered on this borrower's own status-0 loans.
+  // Cancelling returns the borrower's collateral immediately, but does NOT
+  // touch escrowed contributions - each contributor still has to call their
+  // own reclaimContribution(), which is why the confirmation copy below says
+  // so explicitly.
+  async function cancelLoan(loanContractAddr: `0x${string}`, loanId: bigint) {
+    setCancelError(null);
+    setCancelErrorLoanId(null);
+    setCancelingLoanId(loanId);
+    setCancelHash(undefined);
+    try {
+      await switchChainAsync({ chainId });
+      const hash = await writeContractAsync({
+        address: loanContractAddr,
+        abi: LOAN_ABI,
+        functionName: 'cancel',
+        chainId,
+      });
+      setCancelHash(hash);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Transaction failed';
+      setCancelError(msg.length > 160 ? msg.slice(0, 157) + '…' : msg);
+      setCancelErrorLoanId(loanId);
+      setCancelingLoanId(null);
     }
   }
 
@@ -676,6 +717,62 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                   </div>
                 )}
 
+                {/* Cancel - borrower-only, Requested-only on-chain (Loan.sol cancel());
+                    gated the same way here. */}
+                {isOpen && (() => {
+                  const isCancelingThis = cancelingLoanId === id;
+                  const isCancelBusy = isCancelingThis && (isCancelConfirming || !cancelHash);
+                  return (
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 mb-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <p className="text-[11px] text-slate-600 max-w-md">
+                          Cancelling returns your {collateralEth.toFixed(6)} ETH collateral immediately.
+                          It does not touch what lenders have already put in - each contributor keeps
+                          their own Reclaim button to get their escrowed contribution back.
+                        </p>
+                        <button
+                          onClick={() => void cancelLoan(terms.loanContract, id)}
+                          disabled={isCancelBusy}
+                          className="h-9 px-4 rounded-lg border border-red-500/30 bg-red-500/10 text-xs font-bold text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap flex-shrink-0"
+                        >
+                          {isCancelingThis && !cancelHash ? (
+                            <>
+                              <span className="h-3 w-3 rounded-full border-2 border-red-400 border-t-transparent animate-spin" />
+                              Confirm…
+                            </>
+                          ) : isCancelingThis && isCancelConfirming ? (
+                            <>
+                              <span className="h-3 w-3 rounded-full border-2 border-red-400 border-t-transparent animate-spin" />
+                              Confirming…
+                            </>
+                          ) : isCancelingThis && isCancelConfirmed ? (
+                            <>
+                              <Check className="h-3.5 w-3.5" /> Cancelled
+                            </>
+                          ) : (
+                            'Cancel request'
+                          )}
+                        </button>
+                      </div>
+                      {isCancelingThis && cancelHash && (
+                        <div className="mt-2">
+                          <a
+                            href={`https://sepolia.etherscan.io/tx/${cancelHash}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[10px] font-mono text-blue-400"
+                          >
+                            {cancelHash.slice(0, 18)}… ↗
+                          </a>
+                        </div>
+                      )}
+                      {cancelError && cancelErrorLoanId === id && (
+                        <p className="mt-2 text-[11px] text-red-400 font-mono break-all">{cancelError}</p>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* Repay — only meaningful once the loan is Funded */}
                 {isFunded && (
                   <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 mb-3">
@@ -827,6 +924,7 @@ export function BorrowerLoansSection({ factoryAddress, chainId = sepolia.id, eth
                       events={eventsByLoan.get(terms.loanContract.toLowerCase()) ?? []}
                       statusVal={statusNum}
                       priceFor={priceFor}
+                      viewerAddress={address}
                     />
                   </div>
                 )}

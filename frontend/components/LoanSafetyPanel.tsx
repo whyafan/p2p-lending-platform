@@ -30,8 +30,17 @@ type Props = {
   durationDays: number;
   /** Live LTV from the contract (0–1). null when the oracle is unavailable. */
   currentLtv: number | null;
+  /** Whole-loan figures - this pool's total collateral and principal, not any one lender's. */
   collateralUsd: number | null;
   principalUsd: number | null;
+  /**
+   * This viewer's fraction of the loan's principal (0-1), when they have a
+   * position. 0 or omitted means "no personal position yet" - the panel then
+   * shows the loan's whole-pool figures labelled as the loan's, not "yours".
+   * Multi-lender pooling means principalUsd/collateralUsd above are never a
+   * single lender's own numbers.
+   */
+  myShareFrac?: number;
   /** Contract's own view — the authoritative gate. */
   isLiquidatable?: boolean;
   /** Persisted borrower assessment, when one was saved at request time. */
@@ -53,6 +62,7 @@ export function LoanSafetyPanel({
   currentLtv,
   collateralUsd,
   principalUsd,
+  myShareFrac,
   isLiquidatable,
   assessment,
 }: Props) {
@@ -64,17 +74,30 @@ export function LoanSafetyPanel({
   const threshold = maxLtv + buffer;
   const apr = interestBps / 10_000;
 
-  // How far ETH can fall before this position becomes liquidatable. Debt is
+  // A personal position exists only once this viewer actually holds a share
+  // of the pool - otherwise the "Your protection" heading and figures below
+  // would be asserting a position that doesn't exist yet.
+  const hasPosition = (myShareFrac ?? 0) > 0;
+  const myCollateralUsd =
+    collateralUsd !== null && hasPosition ? collateralUsd * (myShareFrac as number) : null;
+  const myPrincipalUsd =
+    principalUsd !== null && hasPosition ? principalUsd * (myShareFrac as number) : null;
+
+  // How far ETH can fall before this loan becomes liquidatable. Debt is
   // frozen in USD at funding, so LTV scales inversely with price:
-  // liquidation at  currentLtv / threshold  of today's price.
+  // liquidation at  currentLtv / threshold  of today's price. Price-invariant
+  // to any one lender's share, so this stays loan-wide regardless of hasPosition.
   const dropToLiquidation =
     currentLtv !== null && currentLtv > 0 && threshold > 0
       ? Math.max(0, 1 - currentLtv / threshold)
       : null;
 
-  // What the lender recovers at the moment of liquidation, before gas.
+  // What the pool recovers at the moment of liquidation, before gas - loan-wide,
+  // scaled down to this viewer's share only where it's presented as personal.
   const collateralAtThreshold =
     principalUsd !== null && threshold > 0 ? principalUsd / threshold : null;
+  const myCollateralAtThreshold =
+    collateralAtThreshold !== null && hasPosition ? collateralAtThreshold * (myShareFrac as number) : null;
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-950/40 overflow-hidden">
@@ -126,18 +149,28 @@ export function LoanSafetyPanel({
 
           {/* what protects the lender */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-2">
-            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Your protection</p>
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+              {hasPosition ? 'Your protection' : "This loan's collateralisation"}
+            </p>
 
             <ul className="space-y-1.5 text-[11px] text-slate-500">
               <li className="flex gap-2">
                 <span className="text-emerald-400">•</span>
                 <span>
                   <span className="text-slate-300 font-bold">Over-collateralised.</span>{' '}
-                  {collateralUsd !== null && principalUsd !== null ? (
+                  {hasPosition && myCollateralUsd !== null && myPrincipalUsd !== null ? (
                     <>
-                      {formatUsd(collateralUsd)} locked against {formatUsd(principalUsd)} lent
+                      Your share: {formatUsd(myCollateralUsd)} of collateral secures your {formatUsd(myPrincipalUsd)} contribution
+                      {myCollateralUsd > 0 && (
+                        <> - {formatPercent(myCollateralUsd / myPrincipalUsd - 1)} more than you put in</>
+                      )}
+                      . (Loan total: {formatUsd(collateralUsd ?? 0)} collateral against {formatUsd(principalUsd ?? 0)} principal.)
+                    </>
+                  ) : collateralUsd !== null && principalUsd !== null ? (
+                    <>
+                      This loan has {formatUsd(collateralUsd)} locked against {formatUsd(principalUsd)} principal
                       {collateralUsd > 0 && (
-                        <> — {formatPercent(collateralUsd / principalUsd - 1)} more than the loan</>
+                        <> - {formatPercent(collateralUsd / principalUsd - 1)} more than the loan</>
                       )}.
                     </>
                   ) : (
@@ -152,7 +185,7 @@ export function LoanSafetyPanel({
                   <span className="text-slate-300 font-bold">Liquidation at {formatPercent(threshold)} LTV.</span>{' '}
                   {dropToLiquidation !== null ? (
                     <>ETH would have to fall <span className="font-mono text-amber-400">{formatPercent(dropToLiquidation)}</span> from
-                    today&apos;s price before you can seize the collateral.</>
+                    today&apos;s price before any contributor can trigger liquidation{hasPosition ? ' and recover your pro-rata share' : ''}.</>
                   ) : (
                     <>Triggered when collateral value falls far enough against the debt.</>
                   )}
@@ -163,7 +196,8 @@ export function LoanSafetyPanel({
                 <span>
                   <span className="text-slate-300 font-bold">Missed deadline.</span>{' '}
                   If they haven&apos;t repaid {durationDays} days after funding, plus a 2-day grace
-                  period, you can liquidate regardless of price.
+                  period, any contributor to the pool{hasPosition ? ' - including you' : ''} can trigger
+                  liquidation regardless of price; proceeds split pro-rata across every contributor.
                 </span>
               </li>
             </ul>
@@ -174,16 +208,19 @@ export function LoanSafetyPanel({
             <p className="text-[10px] font-bold text-amber-400/90 uppercase tracking-widest">What can go wrong</p>
             <ul className="space-y-1 text-[11px] text-amber-400/70">
               <li>
-                Liquidation is <span className="font-bold">not automatic</span> — you have to call it.
-                Nothing seizes the collateral on your behalf.
+                Liquidation is <span className="font-bold">not automatic</span> - any contributor has to
+                call it themselves. Nothing seizes the collateral automatically on anyone&apos;s behalf.
               </li>
               <li>
-                Liquidation recovers <span className="font-bold">only what you are owed</span> — the
-                surplus collateral returns to the borrower, so it makes you whole rather than
-                paying out the full deposit.
-                {collateralAtThreshold !== null && (
-                  <> At the threshold the collateral is worth about {formatUsd(collateralAtThreshold)}.</>
-                )}
+                Liquidation recovers <span className="font-bold">only what is owed</span> - the
+                surplus collateral returns to the borrower, so it makes the pool whole rather than
+                paying out the full deposit
+                {hasPosition ? ', and your own recovery is capped at your pro-rata share' : ''}.
+                {hasPosition && myCollateralAtThreshold !== null ? (
+                  <> At the threshold your share of the collateral is worth about {formatUsd(myCollateralAtThreshold)}.</>
+                ) : collateralAtThreshold !== null ? (
+                  <> At the threshold the loan&apos;s collateral is worth about {formatUsd(collateralAtThreshold)}.</>
+                ) : null}
               </li>
               <li>
                 A crash faster than you react can still leave the collateral worth less than the

@@ -47,11 +47,25 @@ export const LOAN_ABI = [
     stateMutability: 'view',
   },
   {
+    name: 'requestedAt',
+    type: 'function',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
     name: 'contribute',
     type: 'function',
     inputs: [],
     outputs: [],
     stateMutability: 'payable',
+  },
+  {
+    name: 'cancel',
+    type: 'function',
+    inputs: [],
+    outputs: [],
+    stateMutability: 'nonpayable',
   },
   {
     name: 'withdraw',

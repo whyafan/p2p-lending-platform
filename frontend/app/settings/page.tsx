@@ -15,7 +15,7 @@ import { Hexagon, Check, Wallet } from 'lucide-react';
 
 const ROLE_OPTIONS = [
   { value: 'borrower', label: 'Borrow', desc: 'Request ETH loans against crypto collateral' },
-  { value: 'lender', label: 'Lend', desc: 'Fund loan requests and earn interest' },
+  { value: 'lender', label: 'Lend', desc: 'Contribute to loan requests and earn interest' },
   { value: 'both', label: 'Both', desc: 'Borrow and lend on one account' },
 ] as const;
 

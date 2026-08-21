@@ -37,7 +37,8 @@ export type LoanEvent = {
   amount: bigint;
   /** Liquidations only: what went back to the borrower. */
   refunded?: bigint;
-  /** Who acted (lender for funded/liquidated, borrower for repayments). */
+  /** Who acted (lender for liquidated, borrower for repayments). `funded` has
+   *  no single actor - the pool funded it, not one lender. */
   actor?: string;
   /** ShareDistributed only: true when the push failed and the share is pending withdrawal. */
   pending?: boolean;

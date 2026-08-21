@@ -554,7 +554,7 @@ export default function AppPage() {
                       { Icon: GraduationCap, label: 'Get your grade',              desc: 'We check 8 things about you (wallet age, history) and give you a grade: A, B, or C.' },
                       { Icon: Banknote,      label: 'Choose how much you want',    desc: 'Pick an amount and how long you need it. We show the exact interest upfront, no surprises.' },
                       { Icon: ShieldCheck,   label: 'Put up a security deposit',   desc: 'Like renting a flat: lock some ETH as security. You get it all back when you repay.' },
-                      { Icon: Handshake,     label: 'A lender sends you the money', desc: 'Someone on the other side sees your request and sends you the funds directly.' },
+                      { Icon: Handshake,     label: 'Lenders fund your request',   desc: 'One or more lenders each put in part of the amount. Once the pool fills, the ETH is sent to you.' },
                       { Icon: CheckCircle2,  label: 'Repay & get your deposit back', desc: 'Pay back the loan and interest on time, and your security deposit is returned instantly.' },
                     ].map(({ Icon, label, desc }) => (
                       <li key={label} className="flex items-start gap-3">

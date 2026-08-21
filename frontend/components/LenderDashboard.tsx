@@ -56,8 +56,14 @@ const TIER_BADGE: Record<string, string> = {
   C: 'bg-red-500/20 text-red-400 border-red-500/40',
 };
 
-function timeLeft(createdAt: bigint): string {
-  const deadline = Number(createdAt) + FUNDING_WINDOW_SECS;
+// Funding-window expiry is gated on Loan.sol's requestedAt, not the factory's
+// createdAt: createdAt never changes, while requestedAt is what fastForward()
+// rewinds on /demo to simulate time passing. requestedAt is undefined only
+// while its read is still in flight - treat that as "unknown", not expired,
+// so the countdown never flashes a wrong value before the real read resolves.
+function timeLeft(requestedAt: bigint | undefined): string {
+  if (requestedAt === undefined) return '…';
+  const deadline = Number(requestedAt) + FUNDING_WINDOW_SECS;
   const remaining = deadline - Math.floor(Date.now() / 1000);
   if (remaining <= 0) return 'Expired';
   const d = Math.floor(remaining / 86400);
@@ -65,8 +71,9 @@ function timeLeft(createdAt: bigint): string {
   return d > 0 ? `${d}d ${h}h left` : `${h}h left`;
 }
 
-function isExpired(createdAt: bigint): boolean {
-  const deadline = Number(createdAt) + FUNDING_WINDOW_SECS;
+function isExpired(requestedAt: bigint | undefined): boolean {
+  if (requestedAt === undefined) return false;
+  const deadline = Number(requestedAt) + FUNDING_WINDOW_SECS;
   return Math.floor(Date.now() / 1000) > deadline;
 }
 
@@ -166,7 +173,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     query: { enabled: termsContracts.length > 0, refetchInterval: POLL_MS },
   });
 
-  // ── Round 3: read status + lender for each loan contract ──
+  // ── Round 3: read status + this account's contribution for each loan contract ──
   const loanContractAddresses = useMemo(
     () =>
       (termsResults ?? []).map(
@@ -250,6 +257,52 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     });
     return map;
   }, [pendingWithdrawalContracts, pendingWithdrawalResults]);
+
+  // requestedAt drives the actual funding-window deadline (see timeLeft/isExpired
+  // above) - createdAt from the factory is fixed at creation and never reflects
+  // fastForward() on /demo.
+  const requestedAtContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'requestedAt' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: requestedAtResults, refetch: refetchRequestedAt } = useReadContracts({
+    contracts: requestedAtContracts,
+    query: { enabled: requestedAtContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const requestedAtByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    requestedAtContracts.forEach((c, i) => {
+      const r = requestedAtResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [requestedAtContracts, requestedAtResults]);
+
+  // amountRepaid is the contract's own cumulative-paid figure, unlike
+  // principalAmount - outstandingBalance() which understates what's actually
+  // been repaid by the interest accrued so far.
+  const amountRepaidContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'amountRepaid' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: amountRepaidResults, refetch: refetchAmountRepaid } = useReadContracts({
+    contracts: amountRepaidContracts,
+    query: { enabled: amountRepaidContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const amountRepaidByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    amountRepaidContracts.forEach((c, i) => {
+      const r = amountRepaidResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [amountRepaidContracts, amountRepaidResults]);
 
   // ── Pooled funding progress: how much of the principal each loan already has ──
   const totalContributedContracts = useMemo(
@@ -540,6 +593,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       refetchPreview(),
       refetchOutstanding(),
       refetchPriceAtFunding(),
+      refetchRequestedAt(),
+      refetchAmountRepaid(),
     ]);
   }
 
@@ -582,15 +637,18 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const outstandingVal = loanAddr !== undefined ? outstandingByAddress.get(loanAddr) : undefined;
       const priceAtFundingVal = loanAddr !== undefined ? priceAtFundingByAddress.get(loanAddr) : undefined;
       const pendingWithdrawalVal = loanAddr !== undefined ? pendingWithdrawalByAddress.get(loanAddr) : undefined;
+      const requestedAtVal = loanAddr !== undefined ? requestedAtByAddress.get(loanAddr) : undefined;
+      const amountRepaidVal = loanAddr !== undefined ? amountRepaidByAddress.get(loanAddr) : undefined;
       return {
         id, terms, statusVal, myContribution, totalContributedVal, minContributionVal, isLiquidatableVal, repaymentDueAtVal,
         ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal, pendingWithdrawalVal,
+        requestedAtVal, amountRepaidVal,
       };
     });
   }, [
     loanIds, termsResults, statusByAddress, myContributionByAddress, totalContributedByAddress, minContributionByAddress, isLiquidatableByAddress,
     repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress, previewByAddress, outstandingByAddress, priceAtFundingByAddress,
-    pendingWithdrawalByAddress,
+    pendingWithdrawalByAddress, requestedAtByAddress, amountRepaidByAddress,
   ]);
 
   const settledAddresses = useMemo(
@@ -616,7 +674,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
   });
 
   const openLoans = useMemo(
-    () => loans.filter((l) => l.statusVal === 0 && l.terms && !isExpired(l.terms.createdAt)),
+    () => loans.filter((l) => l.statusVal === 0 && l.terms && !isExpired(l.requestedAtVal)),
     [loans],
   );
 
@@ -638,6 +696,21 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     [loans],
   );
 
+  // A loan is "mine" whenever contributions[me] > 0, with no status
+  // qualifier (design spec). Requested-status loans where I've already put
+  // money in fell through every other filter here: not Funded (myPositions),
+  // not settled, and reclaimableLoans only picks them up once the window has
+  // actually expired. Until then the money is real and escrowed, just not
+  // yet lent - shown separately from active (Funded) positions since it can
+  // still expire or be cancelled rather than earn interest.
+  const pendingContributions = useMemo(
+    () =>
+      loans.filter(
+        (l) => l.statusVal === 0 && l.terms && isMine(l.myContribution) && !isExpired(l.requestedAtVal),
+      ),
+    [loans],
+  );
+
   // Shares a push transfer failed to deliver. Not scoped to myPositions -
   // a loan can be Repaid/Liquidated (and gone from the active list) while
   // still holding an undelivered share for this account.
@@ -655,7 +728,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
         (l) =>
           l.terms &&
           isMine(l.myContribution) &&
-          (l.statusVal === 3 || (l.statusVal === 0 && isExpired(l.terms.createdAt))),
+          (l.statusVal === 3 || (l.statusVal === 0 && isExpired(l.requestedAtVal))),
       ),
     [loans],
   );
@@ -824,9 +897,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             }`}
           >
             My Positions
-            {myPositions.length > 0 && (
+            {myPositions.length + pendingContributions.length > 0 && (
               <span className="ml-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-600 text-[10px] font-black text-white px-1">
-                {myPositions.length}
+                {myPositions.length + pendingContributions.length}
               </span>
             )}
           </button>
@@ -877,7 +950,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 <span>Funded</span>
               </div>
 
-              {openLoans.map(({ id, terms, totalContributedVal, minContributionVal }) => {
+              {openLoans.map(({ id, terms, totalContributedVal, minContributionVal, myContribution, requestedAtVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -970,7 +1043,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                           )}
                         </div>
                         <span className="text-[11px] text-slate-500 font-mono">
-                          {timeLeft(terms.createdAt)}
+                          {timeLeft(requestedAtVal)}
                         </span>
                       </div>
                       <div className="grid grid-cols-2 gap-3 text-xs">
@@ -1004,7 +1077,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                               Tier {tier}
                             </span>
                           )}
-                          <span className="text-[10px] text-slate-600">{timeLeft(terms.createdAt)}</span>
+                          <span className="text-[10px] text-slate-600">{timeLeft(requestedAtVal)}</span>
                         </div>
                         <p className="text-xs font-mono text-slate-400 truncate">
                           {terms.borrower.slice(0, 10)}…{terms.borrower.slice(-8)}
@@ -1090,6 +1163,16 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                           style={{ width: `${Math.min(fundedPct, 100)}%` }}
                         />
                       </div>
+
+                      {isMine(myContribution) && (
+                        <p className="text-[11px] font-bold text-emerald-400 mb-2">
+                          You&apos;ve already contributed{' '}
+                          <span className="font-mono">
+                            {parseFloat(formatEther(myContribution ?? 0n)).toFixed(4)} ETH
+                          </span>{' '}
+                          to this request - it stays escrowed here until the pool fills, expires, or is cancelled.
+                        </p>
+                      )}
 
                       {isSelfLoan ? (
                         <p className="text-[11px] font-bold text-slate-600">
@@ -1194,6 +1277,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         currentLtv={currentLtv}
                         collateralUsd={collateralUsd}
                         principalUsd={principalUsd}
+                        myShareFrac={
+                          myContribution && terms.principalAmount > 0n
+                            ? Number(myContribution) / Number(terms.principalAmount)
+                            : 0
+                        }
                         assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
                       />
                     </div>
@@ -1262,7 +1350,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       {/* ── My Positions Tab ── */}
       {!isLoading && activeTab === 'positions' && (
         <>
-          {/* Claim banner — undelivered shares. Shown above everything else,
+          {/* Claim banner - undelivered shares. Shown above everything else,
               regardless of whether the loan still has an active position,
               since money can be waiting here even on an already-settled loan. */}
           {claimableLoans.length > 0 && (
@@ -1318,7 +1406,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             </div>
           )}
 
-          {/* Reclaim section — dead pools (cancelled, or expired while still
+          {/* Reclaim section - dead pools (cancelled, or expired while still
               Requested) where this account has an escrowed contribution. */}
           {reclaimableLoans.length > 0 && (
             <div className="space-y-2">
@@ -1381,19 +1469,64 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             </div>
           )}
 
-          {myPositions.length === 0 ? (
+          {/* Pending contributions - status 0 (Requested) loans where I've
+              already contributed but the pool hasn't filled yet. A loan is
+              "mine" the moment contributions[me] > 0, regardless of status
+              (design spec) - this money is real and escrowed, but not yet
+              lent, so it's shown apart from the active (Funded) positions
+              below rather than mixed in with them. */}
+          {pendingContributions.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">
+                Pending contributions ({pendingContributions.length})
+              </p>
+              {pendingContributions.map((l) => {
+                if (!l.terms) return null;
+                const key = l.id.toString();
+                const myContribEth =
+                  l.myContribution !== undefined ? parseFloat(formatEther(l.myContribution)) : null;
+                const principalEth = parseFloat(formatEther(l.terms.principalAmount));
+                const fundedWei = l.totalContributedVal ?? 0n;
+                const fundedPct =
+                  l.terms.principalAmount > 0n
+                    ? Number((fundedWei * 10_000n) / l.terms.principalAmount) / 100
+                    : 0;
+                return (
+                  <div
+                    key={key}
+                    className="rounded-xl border border-blue-500/20 bg-blue-500/5 px-4 py-3 space-y-1.5"
+                  >
+                    <p className="text-xs text-slate-300">
+                      <span className="font-mono text-slate-600">#{key}</span>{' '}
+                      You&apos;ve contributed{' '}
+                      <span className="font-mono font-bold text-white">
+                        {myContribEth !== null ? myContribEth.toFixed(4) : '…'} ETH
+                      </span>{' '}
+                      to this request. It is escrowed in the contract, not yet lent - the pool is{' '}
+                      <span className="font-mono">{fundedPct.toFixed(0)}%</span> funded of{' '}
+                      <span className="font-mono">{principalEth.toFixed(4)} ETH</span>, and this money earns
+                      nothing until the pool fills. It can still expire ({timeLeft(l.requestedAtVal)}) or be
+                      cancelled by the borrower, either of which unlocks it for reclaim.
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {myPositions.length === 0 && pendingContributions.length === 0 ? (
             <div className="rounded-2xl border border-slate-800 bg-[#111827] py-16 text-center">
               <div className="inline-flex h-14 w-14 items-center justify-center rounded-full border border-dashed border-slate-700 mb-4">
                 <TrendingUp className="h-7 w-7 text-slate-700" />
               </div>
               <p className="text-sm font-bold text-slate-500">No active positions</p>
               <p className="text-xs text-slate-700 mt-1 max-w-xs mx-auto">
-                Fund a loan request to see your position here.
+                Contribute to a loan request to see your position here.
               </p>
             </div>
-          ) : (
+          ) : myPositions.length === 0 ? null : (
             <div className="space-y-3">
-              {myPositions.map(({ id, terms, myContribution, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal }) => {
+              {myPositions.map(({ id, terms, myContribution, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal, amountRepaidVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -1464,13 +1597,12 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 // contract itself uses to split every repayment and seizure -
                 // never via a float intermediate.
                 const myOutstandingWei = myShareOfWei(outstandingVal, myContribution, terms.principalAmount);
-                const repaidSoFarWei =
-                  outstandingVal === undefined
-                    ? undefined
-                    : terms.principalAmount > outstandingVal
-                    ? terms.principalAmount - outstandingVal
-                    : 0n;
-                const myRepaidSoFarWei = myShareOfWei(repaidSoFarWei, myContribution, terms.principalAmount);
+                // amountRepaid() is the contract's own cumulative-paid figure.
+                // principalAmount - outstandingBalance() looks similar but
+                // understates it by whatever interest has accrued so far,
+                // since outstandingBalance() grows with interest between
+                // payments while amountRepaid() does not.
+                const myRepaidSoFarWei = myShareOfWei(amountRepaidVal, myContribution, terms.principalAmount);
                 const mySeizeWei = previewVal
                   ? myShareOfWei(previewVal.seize, myContribution, terms.principalAmount)
                   : null;
@@ -1651,6 +1783,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         currentLtv={currentLtv}
                         collateralUsd={collateralUsd}
                         principalUsd={principalUsd}
+                        myShareFrac={myShareFrac}
                         isLiquidatable={canLiquidate}
                         assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
                       />
