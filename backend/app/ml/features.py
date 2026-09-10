@@ -85,8 +85,14 @@ def build_feature_vector(
 ) -> list[float]:
     """Return a 10-element feature vector aligned with FEATURE_NAMES."""
 
+    # Mainnet Aave repayments and NexusFi platform repayments collapse into one
+    # feature. The model has no reason to treat them differently, and splitting them
+    # would leave the platform column at zero for almost every real borrower.
     total_repaid = defi_repaid + platform_loans_repaid
 
+    # Claims are multiplied by their credibility rather than fed in raw, so an
+    # unbacked income claim contributes proportionally less instead of being either
+    # trusted outright or discarded. An unrecognised band scores 0, i.e. no signal.
     income_score       = _INCOME_SCORES.get(income_band, 0.0) * income_prob
     employment_score   = _EMPLOYMENT_SCORES.get(employment_type, 0.0) * employment_prob
 
@@ -94,6 +100,8 @@ def build_feature_vector(
         float(wallet_age_days),
         float(tx_count),
         float(protocols_count),
+        # Floored at 1.0 so log10 is defined and an empty wallet lands on 0.0 rather
+        # than negative infinity. train.py applies the identical transform.
         math.log10(max(balance_usd, 1.0)),
         float(int(mixer_detected)),
         float(total_repaid),
@@ -116,6 +124,8 @@ def feature_value_label(name: str, value: float, balance_usd: float = 0) -> str:
     if name == "protocols_count":
         return f"{int(value)} protocol{'s' if value != 1 else ''}"
     if name == "log_balance_usd":
+        # Inverse of the log transform, so the UI shows the dollar figure the borrower
+        # would recognise rather than the model's 4.7.
         usd = 10 ** value - 1
         return f"${usd:,.0f}"
     if name == "mixer_detected":

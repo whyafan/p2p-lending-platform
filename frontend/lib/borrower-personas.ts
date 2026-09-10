@@ -31,6 +31,19 @@ export type BorrowerPersona = {
   offChainMetadata: OffChainMetadata;
 };
 
+/**
+ * One persona per tier, so the demo can show all three outcomes without needing three
+ * real wallets with three different histories on mainnet.
+ *
+ * expectedTier is not an input to anything: the scorer runs over the features below
+ * and arrives at a tier on its own. It is recorded so the unit tests can assert that
+ * the model still lands where the fixture claims, which is how a weight or breakpoint
+ * change gets caught.
+ *
+ * sanctionProximity and loanPurpose are carried on every persona but scored by
+ * nothing. They come from the original spec and stay in the data as the shape the
+ * screening and underwriting work would fill in.
+ */
 export const BORROWER_PERSONAS: BorrowerPersona[] = [
   {
     id: 'alice',

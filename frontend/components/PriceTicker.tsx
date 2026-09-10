@@ -13,6 +13,10 @@ type MarketResponse = {
 
 const TICKER_ORDER = ['BTC', 'ETH', 'SOL', 'BNB', 'AVAX', 'LINK', 'UNI', 'MATIC', 'USDC'];
 
+// Precision scales with magnitude so every row carries roughly the same information:
+// four decimals on a sub-dollar token, none on a five-figure one. USDC is special-cased
+// because the only interesting thing about a stablecoin's price is the depeg, which
+// lives in digits a two-decimal format would round away.
 function formatPrice(symbol: string, usd: number): string {
   if (usd === 0) return '···';
   if (symbol === 'USDC') return `$${usd.toFixed(4)}`;
@@ -56,11 +60,17 @@ export function PriceTicker() {
 
   const [items, setItems] = useState<TickerItem[]>([]);
   const [ticked, setTicked] = useState<Set<string>>(new Set());
+  // Previous prices live in a ref rather than state: they exist only to diff against
+  // the incoming values, and storing them in state would trigger the render they are
+  // meant to describe.
   const prevRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     if (!data?.marketData) return;
 
+    // Iterating TICKER_ORDER rather than the response keys fixes the order on screen.
+    // A marquee whose contents reshuffle whenever the upstream response changes shape
+    // is unreadable, and a coin missing from one poll must not shift every other one.
     const next = TICKER_ORDER
       .map((sym) => {
         const entry = data.marketData[sym];

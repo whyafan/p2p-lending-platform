@@ -67,6 +67,9 @@ const LOAN_EVENT_ABI = [
 ] as const;
 
 // Public RPCs cap how many blocks a single eth_getLogs may span.
+// 9,000 rather than the usual 10,000 limit: the range is inclusive at both ends and
+// providers differ on whether they count it that way, so the margin avoids tripping a
+// limit by one block on some endpoint and silently losing that chunk.
 const LOG_CHUNK = 9_000n;
 
 /**
@@ -82,6 +85,10 @@ export function getLogsClient() {
   return createPublicClient({ chain: sepolia, transport: http('/api/rpc/logs') });
 }
 
+// Module-level and never invalidated, which is safe because the answer cannot change:
+// the first block at or after a past timestamp is fixed once it is mined. Worth
+// caching because the search costs a logarithmic number of round trips and every
+// history refresh asks for the same handful of timestamps.
 const timestampBlockCache = new Map<string, bigint>();
 
 /**
@@ -103,6 +110,8 @@ export async function findBlockByTimestamp(
   const cached = timestampBlockCache.get(key);
   if (cached !== undefined) return cached;
 
+  // A target in the future has no block yet, so the search would run to the chain head
+  // anyway. Returning early skips the whole binary search for that case.
   const latest = await client.getBlock();
   if (Number(latest.timestamp) <= targetTimestamp) {
     return latest.number ?? BigInt(0);
@@ -145,10 +154,16 @@ export async function fetchLoanEvents(
 
   for (let start = fromBlock; start <= latest; start += LOG_CHUNK + 1n) {
     const end = start + LOG_CHUNK > latest ? latest : start + LOG_CHUNK;
+    // One query for every loan contract at once. Per-contract queries would multiply
+    // the round trips by the number of loans on screen, and the address filter costs
+    // the node nothing extra.
     let logs;
     try {
       logs = await client.getLogs({ address: loanContracts, fromBlock: start, toBlock: end });
     } catch (err) {
+      // One bad chunk should not lose the rest of the history. The gap shows as
+      // missing events rather than as an empty list, and the console line is what
+      // makes that distinguishable from a loan genuinely having no activity.
       console.error('[loan-events] getLogs failed', start, end, err);
       continue;
     }
@@ -158,6 +173,9 @@ export async function fetchLoanEvents(
       try {
         decoded = decodeEventLog({ abi: LOAN_EVENT_ABI, data: log.data, topics: log.topics });
       } catch {
+        // Not a decode failure to worry about: the address filter guarantees these
+        // logs came from our own Loan contracts, but Loan also emits events this ABI
+        // deliberately omits, DemoTimeSkipped among them.
         continue; // not one of ours
       }
 
@@ -238,6 +256,9 @@ export async function fetchLoanEvents(
     }
   }
 
+  // Block number only, no tiebreak on log index. Sort is stable and the RPC returns
+  // logs in index order within a block, so events that share a block keep the order
+  // they occurred in. Chunks are also walked oldest first, so nothing crosses over.
   events.sort((x, y) => (x.blockNumber === y.blockNumber ? 0 : x.blockNumber < y.blockNumber ? -1 : 1));
   return events;
 }
@@ -256,6 +277,9 @@ export async function fetchBlockTimestamps(
         const block = await client.getBlock({ blockNumber: BigInt(bn) });
         times.set(bn, Number(block.timestamp));
       } catch {
+        // An event with no timestamp renders as "time unknown". Substituting the
+        // current time would put a wrong date on a settlement receipt, which is the
+        // one artefact here a user might rely on.
         /* leave undefined rather than guessing */
       }
     }),

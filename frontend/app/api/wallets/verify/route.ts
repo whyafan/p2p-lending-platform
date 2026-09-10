@@ -4,6 +4,18 @@ import { getSessionUser } from '../../../../lib/auth';
 import { createAdminClient } from '../../../../lib/supabase/admin';
 import { screenWallet, isWalletRiskAcceptable } from '../../../../lib/wallet-screening';
 
+/**
+ * Verify a signed challenge, screen the wallet, and record it as verified.
+ *
+ * The checks run in a fixed order and each one is a gate: an active nonce must exist,
+ * it must not have expired, the signed message must contain that exact nonce, and only
+ * then is the signature itself checked. Verifying the signature first would prove the
+ * user controls the key but not that they were answering this server's challenge,
+ * which is the property that stops a signature being replayed from elsewhere.
+ *
+ * Screening runs after the signature rather than before, so a rejection is recorded
+ * against an address the caller has proven they control.
+ */
 export async function POST(req: Request) {
   try {
     const session = await getSessionUser();
@@ -46,6 +58,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Nonce mismatch' }, { status: 400 });
     }
 
+    // Recovers the signer and compares it to the claimed address. Checking against
+    // `normalized` and not against whatever the signature recovers to is the point: a
+    // valid signature from a different key must not link that key's owner's wallet.
     const valid = await verifyMessage({ address: normalized, message, signature });
     if (!valid) {
       return NextResponse.json({ error: 'Invalid signature' }, { status: 400 });
@@ -64,10 +79,15 @@ export async function POST(req: Request) {
       { onConflict: 'user_id,wallet_address' }
     );
 
+    // Recorded before the acceptance test, so a refused wallet still leaves an audit
+    // trail of why it was refused rather than vanishing on the early return below.
     if (!isWalletRiskAcceptable(screening)) {
       return NextResponse.json({ error: 'Wallet risk too high', screening }, { status: 403 });
     }
 
+    // Demote every existing wallet first, then insert this one as primary. Two rows
+    // flagged primary is the state that has no sensible interpretation, so the clear
+    // has to happen even though it touches rows this request is not otherwise about.
     if (setPrimary) {
       await admin
         .from('linked_wallets')
@@ -85,6 +105,9 @@ export async function POST(req: Request) {
           signature_verified: true,
           verified_at: new Date().toISOString(),
           is_primary: Boolean(setPrimary),
+          // Nonce cleared on success, which is what makes it single-use: the same
+          // signature replayed against this route now fails the "no active nonce" check
+          // at the top rather than verifying a second time.
           nonce: null,
           nonce_expires_at: null,
         },

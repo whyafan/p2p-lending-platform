@@ -47,6 +47,9 @@ function AuthStateSync() {
 }
 
 export function Providers({ children, initialState }: ProvidersProps) {
+  // Both of these go through useState with an initialiser, not a bare call: a config or
+  // a QueryClient constructed during render would be a new instance on every render,
+  // dropping the cache and the wallet connection with it.
   const [config] = useState(() => getConfig());
   // Chain state is shared between two people in real time — a borrower repays and
   // the lender must see it without hitting reload. React Query pauses polling for

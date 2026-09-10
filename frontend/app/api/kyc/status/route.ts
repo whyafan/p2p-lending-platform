@@ -3,6 +3,19 @@ import { getSessionUser } from '../../../../lib/auth';
 import { getDiditSessionStatus, mapDiditStatus } from '../../../../lib/didit';
 import { createAdminClient } from '../../../../lib/supabase/admin';
 
+/**
+ * Reconciles this app's stored KYC status with Didit's.
+ *
+ * Three sources can tell us a verdict, in descending order of immediacy: the redirect
+ * the user just came back on, a direct poll of Didit's API, and the webhook (which
+ * writes independently, in kyc/webhook). This route exists because the webhook is not
+ * guaranteed to have arrived by the time the user lands back on the page, and a user
+ * staring at "pending" after being told they were approved is the failure it prevents.
+ *
+ * Both write paths are skipped once the stored status is APPROVED or REJECTED. Those
+ * are terminal, and re-deriving them from a stale redirect parameter could walk a
+ * decided user backwards.
+ */
 export async function GET(req: Request) {
   const session = await getSessionUser();
   if (!session) {
@@ -16,6 +29,8 @@ export async function GET(req: Request) {
 
   console.log('[kyc/status] kyc_status:', profile.kyc_status, '| db session_id:', profile.didit_session_id ?? 'NULL', '| param session_id:', sessionIdParam ?? 'none', '| returnedStatus:', returnedStatus ?? 'none');
 
+  // Stored id wins over the query parameter: the parameter is attacker-controlled, and
+  // polling an arbitrary session id would report someone else's verdict as this user's.
   const sessionId = profile.didit_session_id ?? sessionIdParam;
   const admin = createAdminClient() ?? session.serverClient;
 
@@ -91,6 +106,8 @@ export async function GET(req: Request) {
       const mapped = mapDiditStatus(statusRaw);
       console.log('[kyc/status] statusRaw:', statusRaw, '→', mapped);
 
+      // Only a decided verdict is written back. Persisting PENDING would overwrite
+      // nothing useful and would clear rejection_reason on a profile that has one.
       if (mapped !== 'PENDING') {
         const { error: updateErr } = await admin
           .from('profiles')

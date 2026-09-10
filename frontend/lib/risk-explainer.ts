@@ -33,7 +33,14 @@ export type RiskExplanation = {
   contributions: FeatureContribution[];
 };
 
-/** Tier boundaries: score ≥ A_THRESHOLD → A, ≥ B_THRESHOLD → B, else C */
+/**
+ * Tier boundaries: score ≥ A_THRESHOLD → A, ≥ B_THRESHOLD → B, else C
+ *
+ * B starts at zero so the sign of the score is the tier boundary: a borrower whose
+ * positives and negatives cancel out is average, not penalised. The same two cutoffs
+ * are hardcoded in the Python fallback scorer, so changing them here alone would let
+ * the two scoring paths disagree about the same borrower.
+ */
 export const TIER_THRESHOLDS = { A: 0.40, B: 0.00 } as const;
 
 export type FeatureScoringGuide = {
@@ -134,6 +141,14 @@ export const FEATURE_SCORING_GUIDE: FeatureScoringGuide[] = [
 /**
  * Feature weights must sum to 1.0.
  * Order matches FEATURE_SCORING_GUIDE and the contributions array in explainPersonaRisk.
+ *
+ * Positional, and zipped by index in scoreFeatureVector, so this array, the guide
+ * above and the scorer call order are three lists that must stay aligned. Reordering
+ * any one of them mis-weights every feature silently. Kept separate anyway because
+ * the guide is display data and this is the model.
+ *
+ * Summing to 1.0 is what keeps the weighted total inside [-1, +1] and makes each
+ * weight readable as "this feature is a quarter of the decision".
  */
 export const FEATURE_WEIGHTS = [0.15, 0.10, 0.10, 0.25, 0.10, 0.15, 0.10, 0.05] as const;
 
@@ -198,15 +213,23 @@ function scoreDeFiLoans(
 ): Omit<FeatureContribution, 'weight'> {
   let score: number;
   let value: string;
+  // Liquidations are tested first and short-circuit everything below: a borrower with
+  // ten clean repayments and one liquidation scores as the liquidation, not as an
+  // average of the two. Being liquidated once is the event this feature exists to
+  // catch, and letting volume dilute it would defeat the heaviest weight in the model.
   if (liquidations > 0) {
     score = -0.8;
     value = `${liquidations} liquidation(s), ${repaid}/${taken} repaid`;
+    // Top score demands repaid === taken, not just repaid >= 2: two repaid out of five
+    // means three are still outstanding, which is a different position entirely.
   } else if (repaid >= 2 && repaid === taken) {
     score = 0.9;
     value = `${repaid}/${taken} repaid — 0 liquidations`;
   } else if (repaid >= 1) {
     score = 0.5;
     value = `${repaid}/${taken} repaid — 0 liquidations`;
+    // No history is mildly negative rather than neutral: an unproven borrower is a
+    // real cost to a lender, but nowhere near the -0.8 a demonstrated failure earns.
   } else if (taken === 0) {
     score = -0.2;
     value = 'No prior DeFi loans';
@@ -252,6 +275,10 @@ function scoreMixerInteraction(interaction: boolean): Omit<FeatureContribution, 
     feature: 'Mixer interaction',
     category: 'on-chain',
     value: interaction ? 'Detected' : 'None detected',
+    // The only -1.0 in the model. At weight 0.15 a detected mixer subtracts 0.15 from
+    // the total on its own, which is enough to move a borderline A to B or a B to C
+    // without any other feature changing. Deliberate: this is a compliance signal, not
+    // a creditworthiness one, and it should be able to override good behaviour.
     score: interaction ? -1.0 : 0.3,
     description: interaction
       ? 'Privacy-mixer usage is a compliance and counterparty concern'
@@ -322,6 +349,10 @@ export function scoreFeatureVector(vector: FeatureVector): RiskExplanation {
     weight: FEATURE_WEIGHTS[i],
   }));
 
+  // The clamp is redundant while the weights sum to 1.0 and every scorer stays inside
+  // [-1, +1], which they do. It is here so that if either invariant is ever broken the
+  // failure shows up as a saturated tier rather than as a score outside its own scale
+  // being rendered in the UI and compared against the thresholds.
   const overallScore = Math.max(
     -1,
     Math.min(1, contributions.reduce((sum, c) => sum + c.score * c.weight, 0))

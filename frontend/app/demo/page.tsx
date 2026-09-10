@@ -169,6 +169,10 @@ export default function DemoPage() {
     });
   }, [loanIds, termsResults, loanAddresses, statusRes, ltvRes, liqRes, contributionRes]);
 
+  // One wrapper around every write on this page, so the chain switch, the busy label
+  // and the error truncation are identical whichever control was clicked. `label`
+  // doubles as the key of the button that is currently pending, which is how a page of
+  // buttons shows a spinner on exactly one of them.
   async function send(label: string, fn: () => Promise<`0x${string}`>) {
     setError(null);
     setBusy(label);
@@ -190,6 +194,8 @@ export default function DemoPage() {
         address: priceFeedAddress as `0x${string}`,
         abi: PRICE_FEED_ABI,
         functionName: 'setPrice',
+        // Whole dollars, floored at 0: the feed's interface has no decimals, and a
+        // negative price would underflow the uint256 conversion rather than revert.
         args: [BigInt(Math.max(0, Math.round(value)))],
         chainId,
       }),

@@ -29,6 +29,8 @@ from .features import FEATURE_NAMES, build_feature_vector
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "artifacts")
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
+# Fixed seed, and train_test_split is seeded to match: the training set is generated
+# rather than stored, so reproducing a model means reproducing the data that made it.
 RNG = np.random.default_rng(42)
 
 
@@ -36,6 +38,10 @@ def _clamp(val: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, val))
 
 
+# Lognormal for age, transaction count and balance because all three are bounded below
+# and heavily right-skewed in reality; Poisson for the counting features. The clamps
+# bound each tier's range, and the ranges deliberately overlap between tiers so the
+# model has to learn a boundary rather than read one off a single column.
 def _generate_tier_a(n: int) -> list[list[float]]:
     rows = []
     for _ in range(n):
@@ -45,6 +51,8 @@ def _generate_tier_a(n: int) -> list[list[float]]:
         bal   = _clamp(RNG.lognormal(10.5, 0.6), 12_000, 200_000)
         mixer = int(RNG.random() < 0.01)
         repaid = int(_clamp(RNG.poisson(4), 2, 20))
+        # The one hard rule in the generator: a tier A borrower has never been
+        # liquidated. Every other feature overlaps with tier B somewhere.
         liq   = 0
         inc   = _clamp(RNG.normal(0.55, 0.12), 0.25, 0.80)
         emp   = _clamp(RNG.normal(0.35, 0.08), 0.15, 0.50)
@@ -133,6 +141,8 @@ def train_and_save(n_per_tier: int = 1000) -> None:
     print("Generating synthetic training data…")
     X, y = generate_training_data(n_per_tier)
 
+    # Stratified so the validation split keeps the 1:1:1 tier balance. The classes are
+    # balanced by construction, and an unstratified split could quietly undo that.
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.20, random_state=42, stratify=y
     )
@@ -155,6 +165,9 @@ def train_and_save(n_per_tier: int = 1000) -> None:
     }
 
     print("Training LightGBM model…")
+    # Early stopping matters more than the round count here: the data is synthetic and
+    # separable enough that 300 rounds would overfit the generator's own distributions
+    # rather than the tier boundary.
     callbacks = [lgb.early_stopping(30, verbose=False), lgb.log_evaluation(50)]
     model = lgb.train(
         params,
@@ -166,6 +179,9 @@ def train_and_save(n_per_tier: int = 1000) -> None:
 
     # Evaluation
     proba = model.predict(X_val)
+    # Both metrics are on synthetic data, so they measure whether the model recovered
+    # the generator, not whether the tiers predict real repayment. Read them as a
+    # training sanity check.
     ll = log_loss(y_val, proba)
     auc = roc_auc_score(y_val, proba, multi_class="ovr", average="macro")
     print(f"  Validation log-loss: {ll:.4f}  |  AUC (OvR macro): {auc:.4f}")

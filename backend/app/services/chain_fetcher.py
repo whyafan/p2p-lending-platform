@@ -21,6 +21,8 @@ from eth_utils import keccak, to_checksum_address
 # ─── Alchemy endpoints ────────────────────────────────────────────────────────
 
 def _alchemy_url(network: str) -> str:
+    # A dedicated Sepolia key is optional: one Alchemy app usually covers both
+    # networks, so the mainnet key is the fallback rather than a hard requirement.
     if network == "sepolia":
         key = os.getenv("ALCHEMY_SEPOLIA_API_KEY") or os.getenv("ALCHEMY_API_KEY", "")
     else:
@@ -33,6 +35,11 @@ def _alchemy_url(network: str) -> str:
 
 # ─── Known contract addresses (lowercase) ────────────────────────────────────
 
+# Hand-maintained rather than resolved from a registry: the count only needs to be a
+# breadth signal, so a fixed list of the routers and pools most users actually touch
+# is enough, and it cannot go stale in a way that changes a score unpredictably.
+# Lowercased at the source because every address compared against them comes off the
+# RPC lowercased.
 DEFI_PROTOCOLS: dict[str, str] = {
     "uniswap_v2_router":   "0x7a250d5630b4cf539739df2c5dacb4c659f2488d",
     "uniswap_v3_router":   "0xe592427a0aece92de3edee1f18e0157c05861564",
@@ -66,6 +73,9 @@ TORNADO_CASH_ADDRS: set[str] = {
 
 AAVE_V3_POOL = "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2"
 
+# Topics are derived with keccak at import rather than pasted as literals, so the
+# signature above each one is the thing being read and a typo shows up as no matches
+# in review instead of as a silently empty log query.
 # Aave V3 event topic0 hashes
 # Repay(address indexed reserve, address indexed user, address indexed repayer, uint256, bool)
 AAVE_REPAY_TOPIC   = "0x" + keccak(text="Repay(address,address,address,uint256,bool)").hex()
@@ -146,7 +156,12 @@ async def _asset_transfers(
 
 
 async def _wallet_age_days(client: httpx.AsyncClient, url: str, wallet: str) -> int:
-    """Return days since first outgoing transaction, or 0 if Enhanced API unavailable."""
+    """Return days since first outgoing transaction, or 0 if Enhanced API unavailable.
+
+    Age is measured from the first *outgoing* transfer, not the first incoming one:
+    anyone can send funds to a fresh address, so receiving proves nothing about how
+    long that wallet has been in use.
+    """
     try:
         transfers = await _asset_transfers(
             client, url, wallet, direction="from", max_count=1, order="asc", with_metadata=True
@@ -156,9 +171,14 @@ async def _wallet_age_days(client: httpx.AsyncClient, url: str, wallet: str) -> 
         ts_str: str = (transfers[0].get("metadata") or {}).get("blockTimestamp", "")
         if not ts_str:
             return 0
+        # Alchemy returns Z-suffixed timestamps, which fromisoformat rejected before
+        # 3.11; the substitution keeps this working on older interpreters too.
         first_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
         return (datetime.now(tz=timezone.utc) - first_dt).days
     except Exception:
+        # Every fetcher in this module degrades to a neutral value instead of raising.
+        # A borrower whose history is partly unreadable gets scored on what did come
+        # back, which is worse for them than the truth but never blocks the request.
         return 0
 
 
@@ -167,6 +187,9 @@ async def _protocol_and_mixer(
 ) -> tuple[int, bool]:
     """Return (unique_protocol_count, mixer_detected). Falls back to (0, False) if Enhanced API unavailable."""
     try:
+        # Outgoing only, and one page of 200: protocol breadth saturates long before
+        # that (the score caps at 5+ protocols), so paging further would cost calls
+        # without moving the feature.
         transfers = await _asset_transfers(client, url, wallet, direction="from", max_count=200)
         seen_protocols: set[str] = set()
         mixer_hit = False
@@ -200,8 +223,16 @@ async def _aave_history(
         if not current_hex:
             return _empty
         current_block = int(current_hex, 16)
+        # Bounded window rather than genesis: an unbounded eth_getLogs over the Aave
+        # pool is rejected outright on the free tier. Six months is long enough that
+        # an active borrower's repayment history shows up, and a wallet whose only
+        # DeFi activity is older than that reads as inactive, which is the intent.
         from_block = hex(max(0, current_block - 1_500_000))  # ~6 months
 
+        # The Nones are positional wildcards, and the position of user_topic differs
+        # between the two events: Repay has the user at indexed slot 2 (after the
+        # reserve), LiquidationCall at slot 3 (after both the collateral and debt
+        # assets). Getting either index wrong returns an empty set, not an error.
         repay_logs, liq_logs = await asyncio.gather(
             _rpc(client, url, "eth_getLogs", [{
                 "address": AAVE_V3_POOL,
@@ -256,6 +287,10 @@ async def _nexusfi_history(
         repaid_count  = len(repaid_logs or [])
         return {
             "platform_loans_repaid":    repaid_count,
+            # Everything created but not repaid, which lumps genuinely defaulted loans
+            # in with ones still open or never funded. The router's warning text is
+            # hedged accordingly ("appear unfunded or defaulted") because this count
+            # cannot tell them apart from the factory's events alone.
             "platform_loans_defaulted": max(0, created_count - repaid_count),
         }
     except Exception:
@@ -285,6 +320,9 @@ async def fetch_wallet_data(wallet: str, eth_price_usd: float = 2500.0) -> dict:
                 f"Alchemy mainnet unreachable — check ALCHEMY_API_KEY. Error: {exc}"
             ) from exc
 
+        # Six independent queries, so they run concurrently: sequentially this is the
+        # slowest part of a score by a wide margin, and the Next proxy in front of it
+        # gives up at 20 seconds.
         tx_cnt, bal_eth, wallet_age, (protocols, mixer), aave, nexusfi = (
             await asyncio.gather(
                 _tx_count(client, mainnet_url, wallet),

@@ -51,6 +51,9 @@ function SkeletonCard() {
 }
 
 function ArticleCard({ article }: { article: NewsArticle }) {
+  // Feed image URLs are third-party and frequently dead or hotlink-blocked. Tracked per
+  // card so one broken image collapses its own thumbnail instead of leaving a browser
+  // placeholder icon in the middle of the list.
   const [imgError, setImgError] = useState(false);
   const dotColor = SOURCE_DOTS[article.source] ?? 'bg-slate-600';
 

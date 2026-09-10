@@ -5,6 +5,12 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
+/// @title CollateralVault — sole custodian of borrower collateral
+/// @notice Every position is keyed by loan id and can leave exactly once, either
+///         released to the borrower or split between lender and borrower on
+///         liquidation. Keeping custody here rather than in each Loan means the
+///         funds live behind one audited access-control surface instead of one per
+///         request, and a bug in a single Loan cannot drain another's collateral.
 contract CollateralVault is Ownable, ReentrancyGuard {
     using Address for address payable;
 
@@ -34,6 +40,9 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         _;
     }
 
+    // Authorises against the loan contract recorded when the position was locked, not
+    // against a list the owner maintains. A Loan can therefore only ever move its own
+    // collateral, and no privileged role can move anyone's.
     modifier onlyLoan(uint256 loanId) {
         require(msg.sender == positions[loanId].loanContract, "CollateralVault: caller is not loan");
         _;
@@ -41,6 +50,12 @@ contract CollateralVault is Ownable, ReentrancyGuard {
 
     constructor() Ownable(msg.sender) {}
 
+    /// @notice Point the vault at the factory allowed to lock collateral into it.
+    /// @dev Separate from the constructor because the two contracts reference each
+    ///      other: the factory needs the vault address at deploy time, so the vault
+    ///      has to exist first and learn the factory afterwards.
+    /// @param newFactory Factory address to trust.
+    /// Reverts if not called by the owner, or if newFactory is the zero address.
     function setFactory(address newFactory) external onlyOwner {
         require(newFactory != address(0), "CollateralVault: factory is zero address");
 
@@ -48,6 +63,12 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         emit FactoryUpdated(newFactory);
     }
 
+    /// @notice Take custody of the attached ETH as the collateral for `loanId`.
+    /// @param loanId Factory-assigned id, the key for this position.
+    /// @param borrower Address the surplus or release goes back to.
+    /// @param loanContract The only address subsequently allowed to move this position.
+    /// Reverts unless called by the factory with non-zero value, non-zero borrower and
+    /// loan addresses, and a loanId that has no position yet.
     function lockCollateral(
         uint256 loanId,
         address borrower,
@@ -69,6 +90,14 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         emit CollateralLocked(loanId, borrower, loanContract, msg.value);
     }
 
+    /// @notice Return the whole position to `recipient` and close it.
+    /// @dev Called by the Loan on full repayment or cancellation. The released and
+    ///      liquidated flags are checked together so the two exits are mutually
+    ///      exclusive, not just individually one-shot.
+    /// @param loanId Position to release.
+    /// @param recipient Address to send the collateral to (the borrower, in practice).
+    /// Reverts unless called by this loan's own contract, and unless the position is
+    /// still open and the recipient is non-zero.
     function releaseCollateral(uint256 loanId, address payable recipient)
         external
         onlyLoan(loanId)
@@ -80,6 +109,9 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         require(!position.liquidated, "CollateralVault: already liquidated");
         require(recipient != address(0), "CollateralVault: recipient is zero address");
 
+        // Position is zeroed and flagged before the transfer: sendValue hands control
+        // to the recipient, and the guard plus the cleared amount mean a re-entrant
+        // call finds nothing left to withdraw.
         uint256 amount = position.amount;
         position.released = true;
         position.amount = 0;
@@ -95,6 +127,11 @@ contract CollateralVault is Ownable, ReentrancyGuard {
     ///      contract now passes exactly what covers the outstanding balance and
     ///      whatever is left over goes back to the borrower in the same call.
     ///      Still one-shot: the position closes here, it is not drawn down twice.
+    /// @param loanId Position to liquidate.
+    /// @param recipient Address receiving the seized portion (the lender).
+    /// @param seizeAmount Wei to seize; the remainder goes to the recorded borrower.
+    /// Reverts unless called by this loan's own contract, and unless the position is
+    /// still open, the recipient is non-zero and seizeAmount fits within the position.
     function liquidateCollateral(uint256 loanId, address payable recipient, uint256 seizeAmount)
         external
         onlyLoan(loanId)
@@ -109,6 +146,8 @@ contract CollateralVault is Ownable, ReentrancyGuard {
         uint256 total = position.amount;
         require(seizeAmount <= total, "CollateralVault: seize exceeds collateral");
 
+        // Refund goes to the borrower recorded at lock time, never to a caller-supplied
+        // address, so a compromised Loan still cannot redirect the surplus.
         address payable borrower = payable(position.borrower);
         uint256 refund = total - seizeAmount;
 

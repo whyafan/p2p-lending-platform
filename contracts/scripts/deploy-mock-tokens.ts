@@ -1,5 +1,7 @@
 import { network } from "hardhat";
 
+// Decimals deliberately mirror the real tokens rather than all being 18, so anything
+// consuming these addresses has to handle 6 and 8 decimal amounts correctly.
 const TOKENS = [
   { env: "USDC", name: "Mock USDC", symbol: "mUSDC", decimals: 6 },
   { env: "WETH", name: "Mock WETH", symbol: "mWETH", decimals: 18 },
@@ -11,6 +13,9 @@ async function main() {
   const publicClient = await viem.getPublicClient();
   const [deployer] = await viem.getWalletClients();
   const chainId = await publicClient.getChainId();
+  // Compared against both the bigint and the number form because the value's runtime
+  // type varies with the client, and a mismatch here would silently label local
+  // addresses as Sepolia ones in the env output below.
   const suffix = chainId === 31337n || chainId === 31337 ? "LOCAL" : "SEPOLIA";
 
   console.log(`\nDeploying mock ERC-20 tokens (chainId ${chainId}, deployer ${deployer.account.address})...\n`);

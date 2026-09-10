@@ -478,3 +478,55 @@ Guards: `fastForward` requires the factory's `demoMode` (a deploy-time flag — 
 | `frontend/.env.local` | All frontend env vars (Supabase, RPC, contract addresses) |
 | `backend/` | Optional FastAPI credit-scoring service, called with fallback |
 | `docs/archive/` | Superseded docs + academic literature review, kept for reference |
+
+---
+
+## 🔧 Documentation/code mismatches to fix (found 2026-08-03 during README write)
+
+| # | Item | Detail | Action |
+|---|---|---|---|
+| D1 | **EIP-712 signing claimed but absent** | PLAN lists "EIP-712 typed term-sheet signing" as ✅ twice, but there is no `signTypedData`/`typedData` anywhere in `frontend/`. `submitLoan()` (`LoanRequestPanel.tsx:632`) calls `createLoan` directly. | Either build it or strike the claim from PLAN and the report. |
+| D2 | **Stale addresses in `.env.example`** | `frontend/.env.example` and `backend/.env.example` still list the abandoned 2026-05-18 deploy (`0xD4cfc8…`, `0x99Cb30…`, `0xC6faac…`). `backend/app/services/chain_fetcher.py:77` hardcodes the same stale factory as its default. | Update all three to the live `0x4dDB…` / `0xeB13…` / `0x5094…`. |
+| D3 | **Real Alchemy key committed** | `backend/.env.example:3` contains what looks like a live key, not a placeholder. | Rotate the key, replace with `YOUR_ALCHEMY_API_KEY`. |
+| D4 | **`scripts/deploy-milestone1.ts` is broken** | Deploys `LoanFactory` with 1 constructor arg; it now takes 3 (`vault`, `priceFeed`, `demoMode`), and the script never deploys `MockPriceFeed`. `npm run deploy:local` and `deploy:ephemeral` both fail. | Fix the script or delete it and point everything at the Ignition module. |
+| D5 | **Verification table addresses don't match anything** | The Blockscout links (`0x0C0B…`, `0x39d8…`, `0xf345…`) are a third address set, neither the live deploy nor the May one. | Re-verify the live three and update the table. |
+| D6 | **No frontend test script, no CI test run** | `frontend/package.json` has no `test` entry; `.github/workflows/deploy.yml` only deploys. Tests run today only via `node --experimental-strip-types --test lib/*.test.ts` (103 passing). | Add `"test"` script + a CI job running it and `npx hardhat test` (28 passing). |
+| D7 | **Backend fallback claim is wrong** | PLAN says `/api/credit/score` falls back to the rule-based scorer. The route returns `{fallback:true}`, but `confirmWalletScore()` only shows a warning and never scores locally. | Implement the local fallback, or correct the claim. |
+| D8 | **On-chain amounts decoupled from the term sheet** | `DEMO_MAX_COLLATERAL_ETH = 0.005` caps what is actually sent, so the USD loan the borrower configures is display-only. Undocumented outside the component. | Document it in the UI and PLAN, or scale it explicitly. |
+
+---
+
+## 📝 Open items from the commenting pass (2026-08-03)
+
+Repo-wide comment pass done: NatSpec on every external/public contract function, inline
+rationale comments across contracts, backend, lib, hooks, routes, components and pages.
+Study notes written to `docs/WALKTHROUGH.md` (what each unit is, what breaks without it,
+likely interview questions with answers). 11 commits, `3a43e19` through `39c47cf`.
+No logic changed: 28 contract tests, 103 frontend tests, `tsc --noEmit` all clean.
+
+These are the loose ends that pass surfaced.
+
+### Needs your explanation before it can be commented
+
+Left deliberately uncommented rather than guessed at.
+
+| # | Item | Detail | Action |
+|---|---|---|---|
+| **W1** | **Double event emit on partial liquidation** | `CollateralVault.sol:126-128` emits `CollateralReleased` *as well as* `CollateralLiquidated` when there is a refund. Nothing in `frontend/` indexes either event (`grep` for both returns zero hits outside the contract). | Decide whether it is for an external indexer, symmetry with the release path, or vestigial. Then comment it, or drop the second emit. |
+| **W2** | **`contracts/scripts/send-op-tx.ts` has no obvious purpose** | Estimates L1 gas and sends 1 wei to itself on the `hardhatOp` network. Nothing else in the repo touches OP Stack. Dates to the first commit. | If it is the leftover Hardhat 3 template sample, delete it. If it is a real spike, say what it was for so it can be labelled. |
+| **W3** | **`next.config.ts` aliases two packages to an empty module** | `porto` and `@gemini-wallet/core` are aliased to `lib/wagmi-empty-module.js`, but both are actually present in `node_modules`. Could be a Turbopack resolution failure, a bundle-size cut, or something else. | Note the reason in a comment above the alias so it does not get removed by someone who assumes it is dead config. |
+
+### Comments that now contradict the code
+
+Both will mislead when studying. Left as-is rather than rewriting the original reasoning.
+
+| # | Item | Detail | Action |
+|---|---|---|---|
+| **W4** | **`AuthStateSync` docblock is stale** | `frontend/app/providers.tsx:20-22` justifies the hook with "`refetchOnWindowFocus` is disabled on useCompliance" and "`staleTime` prevents automatic background refetches". Both are now false: the QueryClient default is `refetchOnWindowFocus: true, staleTime: 0`, and `useCompliance` sets the same explicitly. | The hook is still worth keeping (a background tab never refocuses), so rewrite the *reason*, not the code. |
+| **W5** | **`1d` duration option marked provisional** | `LoanRequestPanel.tsx:82-84` says "keep or remove once that testing is done". Manual testing is recorded complete (2026-07-29, see above). | Decide: keep it as a demo affordance and say so, or remove the option. |
+
+### Likely bug found while reading
+
+| # | Item | Detail | Action |
+|---|---|---|---|
+| **W6** | **`LoanRepaid` log query filters on the wrong address** | `backend/app/services/chain_fetcher.py:247-252` queries `LOAN_REPAID_TOPIC` with `"address": NEXUSFI_FACTORY`. `LoanRepaid` is emitted by each **`Loan`** contract, not by the factory, so this filter should always return zero logs. That makes `platform_loans_repaid` permanently 0 and `platform_loans_defaulted` equal to the borrower's total loan count, which then feeds a false "N platform loan(s) appear unfunded or defaulted" warning. | Resolve loan addresses from `LoanCreated` first, then query `LoanRepaid` against that address list. Not fixed in the commenting pass because it is a logic change. Related to **D2** (same file hardcodes a stale factory default). |

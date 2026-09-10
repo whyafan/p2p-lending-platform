@@ -180,6 +180,10 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
       const contribution =
         idx >= 0 && lenderRes?.[idx]?.status === 'success' ? (lenderRes[idx].result as bigint) : undefined;
 
+      // Ownership depends on the selected role, so the same wallet produces two
+      // different statements: as borrower it matches the terms' borrower field, as
+      // lender the contract's lender. A user who has been both on different loans gets
+      // each set separately rather than one merged ledger they cannot reconcile.
       const mine =
         role === 'borrower' ? t.borrower.toLowerCase() === me : (contribution ?? 0n) > 0n;
       if (!mine) return;

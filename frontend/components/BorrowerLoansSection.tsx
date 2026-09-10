@@ -19,6 +19,9 @@ import { useLoanEvents } from '../hooks/useLoanEvents';
 import { Hexagon, Check, AlertTriangle } from 'lucide-react';
 import { useHydrated } from '../hooks/useHydrated';
 
+// Client-side only. The contracts impose no such limit; this stops one borrower
+// filling the marketplace with requests nobody will fund, each of which locks
+// collateral for seven days until its funding window closes.
 export const MAX_OPEN_REQUESTS = 3;
 // Both sides of a loan watch each other act, so poll briskly rather than
 // every 15-30s. Handfuls of loans on Sepolia — the RPC cost is trivial.
@@ -43,6 +46,17 @@ const TIER_BADGE: Record<string, string> = {
 
 export type StoredLoanTx = { txHash: string; submittedAt: number };
 
+/**
+ * Remember a creation transaction hash so the loan can later be linked back to it.
+ *
+ * LoanCreated carries the hash on chain, but only the event log does; the factory's
+ * stored terms do not, and this component reads terms rather than logs. Keeping the
+ * hash locally is what lets a borrower click through to Etherscan for a request they
+ * made. Keyed per wallet so switching accounts does not show another account's history.
+ *
+ * Keeps the last 20 and swallows every error: this is a convenience, and a browser with
+ * storage disabled or full should lose the Etherscan link, not the ability to borrow.
+ */
 export function storeLoanTx(walletAddress: string, txHash: string) {
   try {
     const key = `nexusfi_loans_${walletAddress.toLowerCase()}`;
@@ -62,6 +76,18 @@ function getStoredTxs(walletAddress: string): StoredLoanTx[] {
   }
 }
 
+/**
+ * Pair an on-chain loan with the local record of the transaction that created it.
+ *
+ * A heuristic, and known to be one: the only thing linking the two is that they
+ * happened at roughly the same time. The five-minute window covers the gap between
+ * submitting and mining, and usedHashes stops one transaction claiming two loans when a
+ * borrower creates several in quick succession.
+ *
+ * Consequences of a wrong match are limited to an Etherscan link pointing at the
+ * neighbouring transaction. The settlement history in useLoanEvents is the real record;
+ * this only covers creation, which emits no event this component reads.
+ */
 function matchTxHash(
   createdAt: bigint,
   storedTxs: StoredLoanTx[],

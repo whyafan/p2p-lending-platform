@@ -18,6 +18,9 @@ class OffChainClaims(BaseModel):
 
 class ScoreRequest(BaseModel):
     wallet_address: str
+    # Passed in by the caller rather than fetched here, so the balance this service
+    # values and the price the UI is showing are the same number. The default only
+    # applies to direct API calls.
     eth_price_usd: float = 2500.0
     off_chain: OffChainClaims
 
@@ -27,6 +30,9 @@ class ScoreRequest(BaseModel):
         v = v.strip()
         if not v.startswith("0x") or len(v) != 42:
             raise ValueError("wallet_address must be a 42-character hex string starting with 0x")
+        # Lowercased at the boundary rather than checksummed. Everything downstream
+        # compares against addresses the RPC returns lowercased, and a checksummed
+        # input would silently miss every one of those comparisons.
         return v.lower()
 
 

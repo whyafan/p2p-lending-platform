@@ -13,6 +13,9 @@ export async function getSessionUser() {
     return null;
   }
 
+  // getUser, never getSession: getSession trusts the cookie as it stands, while
+  // getUser revalidates the token against Supabase. On the server that difference is
+  // the difference between an identity and a claim.
   const { data: { user }, error: authError } = await supabase.auth.getUser();
   if (!user?.email) {
     if (authError) console.error('[auth] getUser failed:', authError.message);
@@ -21,6 +24,9 @@ export async function getSessionUser() {
 
   const db = createAdminClient() ?? supabase;
 
+  // Upsert rather than select: the profile row is created lazily on first authenticated
+  // request instead of by a signup trigger, so a user who exists in Supabase Auth but
+  // has no profile row is a normal state that heals itself here.
   const { data, error } = await db
     .from('profiles')
     .upsert(
@@ -39,6 +45,9 @@ export async function getSessionUser() {
     console.warn('[auth] profiles upsert failed:', error.message, '— run migration 002 or set SUPABASE_SERVICE_ROLE_KEY');
   }
 
+  // A failed upsert degrades to an in-memory profile rather than signing the user out.
+  // They are authenticated either way, and the defaults below are all the restrictive
+  // ones: no KYC, no role, so nothing gated opens up because the write failed.
   const profile: Profile = (data as Profile | null) ?? {
     id: user.id,
     email: user.email,

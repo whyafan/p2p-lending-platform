@@ -86,6 +86,8 @@ export async function POST(req: Request) {
         typeof r.kind === 'string' &&
         typeof r.ethUsd === 'number' &&
         Number.isFinite(r.ethUsd) &&
+        // Zero and negative prices are dropped rather than stored. First write wins, so
+        // a bad value here would be the permanent record for that event.
         r.ethUsd > 0,
     )
     .map((r) => ({
@@ -104,6 +106,9 @@ export async function POST(req: Request) {
   if (!client) return NextResponse.json({ error: 'Database unavailable' }, { status: 503 });
 
   // ignoreDuplicates keeps the first observation authoritative.
+  // Enforced in the database rather than by a read-then-write here, so two clients
+  // observing the same event at once cannot both decide the row is missing and race to
+  // write different prices into it.
   const { error } = await client
     .from('event_price_snapshots')
     .upsert(rows, { onConflict: 'tx_hash,log_kind', ignoreDuplicates: true });

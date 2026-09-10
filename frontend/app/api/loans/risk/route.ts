@@ -15,6 +15,8 @@ import { createClient } from '../../../../lib/supabase/server';
 
 const TIERS = new Set(['A', 'B', 'C']);
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+// Caps the batch read below. The addresses arrive in a query string, so this bounds
+// both the URL length and how much a single request can pull out of the table.
 const MAX_BATCH = 50;
 
 async function db() {
@@ -68,6 +70,8 @@ export async function POST(req: Request) {
 
   // Immutable by design: a borrower must not be able to rewrite the explanation
   // a lender already funded against, so an existing row wins.
+  // insert, never upsert, which is what turns a second attempt into the unique
+  // violation handled below rather than a silent overwrite.
   const { error } = await client.from('loan_risk_assessments').insert({
     loan_contract: loanContract.toLowerCase(),
     chain_id: typeof chainId === 'number' ? chainId : 11155111,
@@ -157,6 +161,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ assessments: {} });
   }
 
+  // No ownership filter, unlike every other read in this codebase. That is the point of
+  // the table: a lender deciding whether to fund a request has to be able to read the
+  // reasoning behind a tier they did not compute. Authentication is still required, so
+  // this is readable by any signed-in user rather than by the public.
   const { data, error } = await client0
     .from('loan_risk_assessments')
     .select('loan_contract, tier, overall_score, contributions, source, persona_id, created_at, model_version, term_sheet_cid, term_sheet_hash')
