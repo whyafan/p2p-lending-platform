@@ -72,7 +72,6 @@ const eventLabel = (e: LoanEvent) =>
 /**
  * Net position on one loan, from the perspective of `role`.
  *
-<<<<<<< HEAD
  * The two sides are not mirror images, because collateral only ever moves on the
  * borrower's side. A lender's ledger is the principal out against repayments and any
  * seizure in. The borrower's counts the collateral as an outflow when it is posted and
@@ -82,9 +81,7 @@ const eventLabel = (e: LoanEvent) =>
  *
  * Read from events rather than from contract state, so the figures agree with the
  * tradebook row for row and each one has a transaction hash behind it.
- */
-export function computeLoanPnl(loan: StatementLoan, role: StatementRole) {
-=======
+ *
  * For a lender on a pooled loan, `viewerAddress` picks out their own
  * ShareDistributed events rather than the loan's totals - the fallback gate
  * is `hasShareData(loan.events)`: with no ShareDistributed events at all (an
@@ -92,7 +89,6 @@ export function computeLoanPnl(loan: StatementLoan, role: StatementRole) {
  * original loan-level computation unchanged.
  */
 export function computeLoanPnl(loan: StatementLoan, role: StatementRole, viewerAddress?: string) {
->>>>>>> atharva
   const zero = BigInt(0);
   const repayments = loan.events.filter(
     (e) => e.kind === 'partial-repayment' || e.kind === 'repaid',
@@ -223,15 +219,10 @@ export function generateTradebook(loans: StatementLoan[], meta: StatementMeta): 
             e.txHash,
           ],
         };
-<<<<<<< HEAD
-      }),
-    )
-    // Sorted across all loans, not within each one: a tradebook is a chronological
-    // ledger of what the account did, so two loans running concurrently interleave.
-=======
       });
     })
->>>>>>> atharva
+    // Sorted across all loans, not within each one: a tradebook is a chronological
+    // ledger of what the account did, so two loans running concurrently interleave.
     .sort((a, b) => a.ts - b.ts)
     .map((r) => r.row);
 
