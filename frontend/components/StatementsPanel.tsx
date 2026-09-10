@@ -14,6 +14,7 @@ import { useAccount, useReadContract, useReadContracts } from 'wagmi';
 import { sepolia } from 'wagmi/chains';
 import { FACTORY_ABI, LOAN_ABI } from '../lib/loan-abi';
 import { useLoanEvents } from '../hooks/useLoanEvents';
+import { distinctLenderActors } from '../lib/share-math';
 import {
   generatePnl,
   generateTaxPnl,
@@ -140,9 +141,21 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
     () => allAddresses.map((a) => ({ address: a, abi: LOAN_ABI, functionName: 'status' as const, chainId })),
     [allAddresses, chainId],
   );
+  // Narrowing (deliberate, same as LenderDashboard): contributions() takes one
+  // address, so this queries only the active connected account, not every
+  // account across every connected wallet.
   const lenderContracts = useMemo(
-    () => allAddresses.map((a) => ({ address: a, abi: LOAN_ABI, functionName: 'lender' as const, chainId })),
-    [allAddresses, chainId],
+    () =>
+      address
+        ? allAddresses.map((a) => ({
+            address: a,
+            abi: LOAN_ABI,
+            functionName: 'contributions' as const,
+            args: [address] as const,
+            chainId,
+          }))
+        : [],
+    [allAddresses, chainId, address],
   );
   const { data: statusRes } = useReadContracts({
     contracts: statusContracts,
@@ -164,15 +177,15 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
       const t = r.result as LoanTermsTuple;
       const idx = allAddresses.indexOf(t.loanContract);
       const statusVal = idx >= 0 && statusRes?.[idx]?.status === 'success' ? Number(statusRes[idx].result) : 0;
-      const lenderAddr =
-        idx >= 0 && lenderRes?.[idx]?.status === 'success' ? (lenderRes[idx].result as string) : undefined;
+      const contribution =
+        idx >= 0 && lenderRes?.[idx]?.status === 'success' ? (lenderRes[idx].result as bigint) : undefined;
 
       // Ownership depends on the selected role, so the same wallet produces two
       // different statements: as borrower it matches the terms' borrower field, as
       // lender the contract's lender. A user who has been both on different loans gets
       // each set separately rather than one merged ledger they cannot reconcile.
       const mine =
-        role === 'borrower' ? t.borrower.toLowerCase() === me : lenderAddr?.toLowerCase() === me;
+        role === 'borrower' ? t.borrower.toLowerCase() === me : (contribution ?? 0n) > 0n;
       if (!mine) return;
 
       out.push({
@@ -183,8 +196,14 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
         interestBps: Number(t.interestBps),
         durationDays: Number(t.durationDays),
         statusVal,
-        counterparty: role === 'borrower' ? lenderAddr : t.borrower,
+        // Pooled loans have many lenders, not one counterparty; refined to an
+        // actual lender count below once this loan's events are indexed.
+        counterparty: role === 'borrower' ? 'pooled' : t.borrower,
         createdAt: Number(t.createdAt),
+        // Contract-read contribution (C1): survives the reporting period
+        // filter applied to `events` below, unlike summing contribution
+        // events would.
+        myContribution: contribution,
       });
     });
     return out;
@@ -208,21 +227,25 @@ export function StatementsPanel({ email, ethPrice }: { email?: string; ethPrice:
   // had no activity at all in the window — a statement for a period shouldn't
   // list loans that did nothing during it.
   const statementLoans: StatementLoan[] = useMemo(() => {
-    const withEvents = myLoans.map((l) => ({
-      ...l,
-      events: (byLoan.get(l.loanContract.toLowerCase()) ?? []).filter((e) => {
+    const withEvents = myLoans.map((l) => {
+      const events = (byLoan.get(l.loanContract.toLowerCase()) ?? []).filter((e) => {
         if (e.timestamp === undefined) return true; // don't silently drop unknowns
         if (range.from !== undefined && e.timestamp < range.from) return false;
         if (range.to !== undefined && e.timestamp > range.to) return false;
         return true;
-      }),
-    }));
-    // All-time keeps every loan, including ones with no indexed events, so a borrower
-    // with an open request still sees it listed. Any bounded period drops the silent
-    // ones, since a loan that did nothing in the window has no place in its statement.
+      });
+      // Replace the 'pooled' placeholder with an actual lender count, when
+      // this loan's ShareDistributed events have been indexed.
+      let counterparty = l.counterparty;
+      if (role === 'borrower') {
+        const n = distinctLenderActors(events).length;
+        counterparty = n > 0 ? `${n} lender${n === 1 ? '' : 's'}` : l.counterparty;
+      }
+      return { ...l, events, counterparty };
+    });
     if (range.from === undefined && range.to === undefined) return withEvents;
     return withEvents.filter((l) => l.events.length > 0);
-  }, [myLoans, byLoan, range]);
+  }, [myLoans, byLoan, range, role]);
 
   function download(kind: 'pnl' | 'tax' | 'tradebook') {
     setBusy(kind);

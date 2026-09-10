@@ -44,9 +44,17 @@ class CreditScorer:
             self._labels   = {0: "A", 1: "B", 2: "C"}
             self._explainer = None
 
-    # Process-wide singleton. Unpickling the booster and building the TreeExplainer
-    # are the expensive part of a score; doing it per request would dominate the
-    # response time and defeat the point of keeping the service warm.
+        from .meta import load_meta, model_version
+        self._meta = load_meta() if self._ready else None
+
+        if self._ready:
+            try:
+                self._live_version = model_version()
+            except OSError:
+                self._live_version = None
+        else:
+            self._live_version = None
+
     @classmethod
     def get(cls) -> "CreditScorer":
         if cls._instance is None:
@@ -56,6 +64,12 @@ class CreditScorer:
     @property
     def ready(self) -> bool:
         return self._ready
+
+    @property
+    def version(self) -> str | None:
+        if not (self._ready and self._meta):
+            return None
+        return self._meta["version"] if self._meta.get("version") == self._live_version else None
 
     def score(
         self,
@@ -129,6 +143,7 @@ class CreditScorer:
             "confidence":    round(confidence, 4),
             "contributions": contributions,
             "fallback_used": fallback_used,
+            "model_version": self.version,
         }
 
 

@@ -1,0 +1,18 @@
+{
+  "version": "v-8c9c64e",
+  "trained_at": "2026-08-21T15:55:22+00:00",
+  "n_samples": null,
+  "feature_names": [
+    "wallet_age_days",
+    "tx_count",
+    "protocols_count",
+    "log_balance_usd",
+    "mixer_detected",
+    "defi_repaid",
+    "defi_liquidations",
+    "income_adjusted",
+    "employment_adjusted",
+    "dishonesty_penalty"
+  ],
+  "lightgbm_params": null
+}

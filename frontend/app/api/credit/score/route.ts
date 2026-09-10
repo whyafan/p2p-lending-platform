@@ -55,3 +55,21 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+/**
+ * GET = warm-up ping. Render's free tier sleeps after 15 min idle and takes
+ * ~50s to wake; any request starts the wake, so the wizard fires this when
+ * the user enters wallet mode. Short timeout on purpose - we only need to
+ * knock, not wait for the door.
+ */
+export async function GET() {
+  try {
+    const res = await fetch(`${BACKEND_URL}/health`, {
+      signal: AbortSignal.timeout(5_000),
+      cache: 'no-store',
+    });
+    return NextResponse.json({ ok: res.ok });
+  } catch {
+    return NextResponse.json({ ok: false });
+  }
+}

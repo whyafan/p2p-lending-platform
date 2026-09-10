@@ -83,7 +83,7 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
       client: { wallet: borrower, public: publicClient },
     });
 
-    await loanAsLender.write.fund({ account: lender.account, value: principalAmount });
+    await loanAsLender.write.contribute({ account: lender.account, value: principalAmount });
 
     return { collateralVault, loanFactory, mockPriceFeed, loanAsLender, loanAsBorrower };
   }
@@ -298,7 +298,7 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
     // borrower is not the lender on this loan
     await viem.assertions.revertWith(
       loanAsBorrower.write.liquidate({ account: borrower.account }),
-      "Loan: caller is not lender",
+      "Loan: caller is not a lender",
     );
   });
   // ── Price-based (collateral shortfall) liquidation ──────────────────────
@@ -466,7 +466,7 @@ describe("Loan lifecycle: repayment deadlines, partial repayment, liquidation", 
       client: { wallet: lender, public: publicClient },
     });
     await viem.assertions.revertWith(
-      asLender.write.fund({ account: lender.account, value: principalAmount }),
+      asLender.write.contribute({ account: lender.account, value: principalAmount }),
       "Loan: funding window has expired",
     );
   });

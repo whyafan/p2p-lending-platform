@@ -7,10 +7,11 @@ import {
   useWriteContract,
   useWaitForTransactionReceipt,
   useAccount,
-  useConnections,
   useSwitchChain,
+  useConfig,
 } from 'wagmi';
-import { formatEther } from 'viem';
+import { waitForTransactionReceipt } from 'wagmi/actions';
+import { formatEther, parseEther } from 'viem';
 import { sepolia, hardhat } from 'wagmi/chains';
 import { inferRiskTierFromBps, RISK_TIER_CONFIG, BASE_APR } from '../lib/loan-terms';
 import { formatUsd, formatPercent } from '../lib/format';
@@ -27,6 +28,9 @@ type StoredAssessment = {
   contributions: FeatureContribution[];
   source?: string | null;
   personaId?: string | null;
+  modelVersion?: string | null;
+  termSheetCid?: string | null;
+  termSheetHash?: string | null;
 };
 import { ClipboardList, TrendingUp, Check, Hexagon, AlertTriangle } from 'lucide-react';
 
@@ -55,8 +59,14 @@ const TIER_BADGE: Record<string, string> = {
   C: 'bg-red-500/20 text-red-400 border-red-500/40',
 };
 
-function timeLeft(createdAt: bigint): string {
-  const deadline = Number(createdAt) + FUNDING_WINDOW_SECS;
+// Funding-window expiry is gated on Loan.sol's requestedAt, not the factory's
+// createdAt: createdAt never changes, while requestedAt is what fastForward()
+// rewinds on /demo to simulate time passing. requestedAt is undefined only
+// while its read is still in flight - treat that as "unknown", not expired,
+// so the countdown never flashes a wrong value before the real read resolves.
+function timeLeft(requestedAt: bigint | undefined): string {
+  if (requestedAt === undefined) return '…';
+  const deadline = Number(requestedAt) + FUNDING_WINDOW_SECS;
   const remaining = deadline - Math.floor(Date.now() / 1000);
   if (remaining <= 0) return 'Expired';
   const d = Math.floor(remaining / 86400);
@@ -64,10 +74,27 @@ function timeLeft(createdAt: bigint): string {
   return d > 0 ? `${d}d ${h}h left` : `${h}h left`;
 }
 
-function isExpired(createdAt: bigint): boolean {
-  const deadline = Number(createdAt) + FUNDING_WINDOW_SECS;
+function isExpired(requestedAt: bigint | undefined): boolean {
+  if (requestedAt === undefined) return false;
+  const deadline = Number(requestedAt) + FUNDING_WINDOW_SECS;
   return Math.floor(Date.now() / 1000) > deadline;
 }
+
+// Scales a loan-wide wei amount down to the caller's pro-rata share, mirroring
+// Loan.sol's own _distribute() formula (value * contribution / principal).
+// Bigint math throughout - converting to float first would reintroduce the
+// precision loss this exists to avoid.
+function myShareOfWei(
+  value: bigint | undefined,
+  myContribution: bigint | undefined,
+  principal: bigint,
+): bigint | null {
+  if (value === undefined || myContribution === undefined || principal <= 0n) return null;
+  return (value * myContribution) / principal;
+}
+
+type TxStatus = 'pending' | 'confirming' | 'confirmed' | 'error';
+type TxState = { status: TxStatus; hash?: `0x${string}`; error?: string };
 
 // Countdown until liquidate() actually becomes callable (repaymentDueAt + grace
 // period). repaymentDueAt is undefined while state is still loading.
@@ -101,18 +128,14 @@ type Props = {
 
 export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testnet' }: Props) {
   const { address } = useAccount();
-  const connections = useConnections();
-  // All accounts the user has authorized for this dapp across every connected wallet
-  const allAddresses = useMemo(
-    () => connections.flatMap((c) => c.accounts).map((a) => a.toLowerCase()),
-    [connections],
-  );
   const { switchChainAsync } = useSwitchChain();
+  const wagmiConfig = useConfig();
   const [activeTab, setActiveTab] = useState<'open' | 'positions'>('open');
   const [fundingLoanId, setFundingLoanId] = useState<bigint | null>(null);
   const [fundingHash, setFundingHash] = useState<`0x${string}` | undefined>(undefined);
   const [fundingError, setFundingError] = useState<string | null>(null);
   const [fundingErrorLoanId, setFundingErrorLoanId] = useState<bigint | null>(null);
+  const [contributionInputs, setContributionInputs] = useState<Record<string, string>>({});
   const [liqLoanId, setLiqLoanId] = useState<bigint | null>(null);
   const [liqHash, setLiqHash] = useState<`0x${string}` | undefined>(undefined);
 
@@ -162,7 +185,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     query: { enabled: termsContracts.length > 0, refetchInterval: POLL_MS },
   });
 
-  // ── Round 3: read status + lender for each loan contract ──
+  // ── Round 3: read status + this account's contribution for each loan contract ──
   const loanContractAddresses = useMemo(
     () =>
       (termsResults ?? []).map(
@@ -184,17 +207,26 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     [loanContractAddresses, chainId],
   );
 
+  // Narrowing (deliberate): the pooled contract's contributions() takes one
+  // address, so we query only the ACTIVE connected account (`address`), not
+  // every account across every connected wallet (as the old single-lender
+  // `lender()` comparison did). Querying per connected account would multiply
+  // this read round by the number of accounts, so positions shown here follow
+  // the active account only, not the full multi-wallet breadth.
   const lenderContracts = useMemo(
     () =>
-      loanContractAddresses
-        .filter((a): a is `0x${string}` => Boolean(a))
-        .map((addr) => ({
-          address: addr,
-          abi: LOAN_ABI,
-          functionName: 'lender' as const,
-          chainId,
-        })),
-    [loanContractAddresses, chainId],
+      address
+        ? loanContractAddresses
+            .filter((a): a is `0x${string}` => Boolean(a))
+            .map((addr) => ({
+              address: addr,
+              abi: LOAN_ABI,
+              functionName: 'contributions' as const,
+              args: [address] as const,
+              chainId,
+            }))
+        : [],
+    [loanContractAddresses, chainId, address],
   );
 
   const { data: statusResults, refetch: refetchStatus } = useReadContracts({
@@ -206,6 +238,126 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     contracts: lenderContracts,
     query: { enabled: lenderContracts.length > 0, refetchInterval: POLL_MS },
   });
+
+  // Shares that a push transfer failed to deliver (repayment or liquidation
+  // distribution) - real money that otherwise sits invisible until withdraw()
+  // is called. Same active-account narrowing as lenderContracts above.
+  const pendingWithdrawalContracts = useMemo(
+    () =>
+      address
+        ? loanContractAddresses
+            .filter((a): a is `0x${string}` => Boolean(a))
+            .map((addr) => ({
+              address: addr,
+              abi: LOAN_ABI,
+              functionName: 'pendingWithdrawals' as const,
+              args: [address] as const,
+              chainId,
+            }))
+        : [],
+    [loanContractAddresses, chainId, address],
+  );
+  const { data: pendingWithdrawalResults, refetch: refetchPendingWithdrawals } = useReadContracts({
+    contracts: pendingWithdrawalContracts,
+    query: { enabled: pendingWithdrawalContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const pendingWithdrawalByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    pendingWithdrawalContracts.forEach((c, i) => {
+      const r = pendingWithdrawalResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [pendingWithdrawalContracts, pendingWithdrawalResults]);
+
+  // requestedAt drives the actual funding-window deadline (see timeLeft/isExpired
+  // above) - createdAt from the factory is fixed at creation and never reflects
+  // fastForward() on /demo.
+  const requestedAtContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'requestedAt' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: requestedAtResults, refetch: refetchRequestedAt } = useReadContracts({
+    contracts: requestedAtContracts,
+    query: { enabled: requestedAtContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const requestedAtByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    requestedAtContracts.forEach((c, i) => {
+      const r = requestedAtResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [requestedAtContracts, requestedAtResults]);
+
+  // amountRepaid is the contract's own cumulative-paid figure, unlike
+  // principalAmount - outstandingBalance() which understates what's actually
+  // been repaid by the interest accrued so far.
+  const amountRepaidContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'amountRepaid' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: amountRepaidResults, refetch: refetchAmountRepaid } = useReadContracts({
+    contracts: amountRepaidContracts,
+    query: { enabled: amountRepaidContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const amountRepaidByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    amountRepaidContracts.forEach((c, i) => {
+      const r = amountRepaidResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [amountRepaidContracts, amountRepaidResults]);
+
+  // ── Pooled funding progress: how much of the principal each loan already has ──
+  const totalContributedContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'totalContributed' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: totalContributedResults, refetch: refetchTotalContributed } = useReadContracts({
+    contracts: totalContributedContracts,
+    query: { enabled: totalContributedContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const totalContributedByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    totalContributedContracts.forEach((c, i) => {
+      const r = totalContributedResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [totalContributedContracts, totalContributedResults]);
+
+  // Read per loan rather than assuming principal/100, so the UI stays correct
+  // if the contract's minimum-contribution rule ever changes.
+  const minContributionContracts = useMemo(
+    () =>
+      loanContractAddresses
+        .filter((a): a is `0x${string}` => Boolean(a))
+        .map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: 'minContribution' as const, chainId })),
+    [loanContractAddresses, chainId],
+  );
+  const { data: minContributionResults, refetch: refetchMinContribution } = useReadContracts({
+    contracts: minContributionContracts,
+    query: { enabled: minContributionContracts.length > 0, refetchInterval: POLL_MS },
+  });
+  const minContributionByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
+    minContributionContracts.forEach((c, i) => {
+      const r = minContributionResults?.[i];
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
+    });
+    return map;
+  }, [minContributionContracts, minContributionResults]);
 
   // ── Round 4: real delinquency/liquidation state for funded loans only ──
   const isLiquidatableContracts = useMemo(
@@ -364,11 +516,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     return map;
   }, [statusContracts, statusResults]);
 
-  const lenderByAddress = useMemo(() => {
-    const map = new Map<string, `0x${string}`>();
+  const myContributionByAddress = useMemo(() => {
+    const map = new Map<string, bigint>();
     lenderContracts.forEach((c, i) => {
       const r = lenderResults?.[i];
-      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as `0x${string}`);
+      if (r?.status === 'success') map.set(c.address.toLowerCase(), r.result as bigint);
     });
     return map;
   }, [lenderContracts, lenderResults]);
@@ -444,6 +596,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       refetchIds(),
       refetchStatus(),
       refetchLenders(),
+      refetchPendingWithdrawals(),
+      refetchTotalContributed(),
+      refetchMinContribution(),
       refetchIsLiquidatable(),
       refetchRepaymentDueAt(),
       refetchLtv(),
@@ -452,6 +607,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       refetchPreview(),
       refetchOutstanding(),
       refetchPriceAtFunding(),
+      refetchRequestedAt(),
+      refetchAmountRepaid(),
     ]);
   }
 
@@ -482,7 +639,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
         termsResult?.status === 'success' ? (termsResult.result as LoanTermsTuple) : null;
       const loanAddr = terms?.loanContract?.toLowerCase();
       const statusVal = loanAddr !== undefined ? statusByAddress.get(loanAddr) : undefined;
-      const lenderAddr = loanAddr !== undefined ? lenderByAddress.get(loanAddr) : undefined;
+      const myContribution = loanAddr !== undefined ? myContributionByAddress.get(loanAddr) : undefined;
+      const totalContributedVal = loanAddr !== undefined ? totalContributedByAddress.get(loanAddr) : undefined;
+      const minContributionVal = loanAddr !== undefined ? minContributionByAddress.get(loanAddr) : undefined;
       const isLiquidatableVal = loanAddr !== undefined ? isLiquidatableByAddress.get(loanAddr) : undefined;
       const repaymentDueAtVal = loanAddr !== undefined ? repaymentDueAtByAddress.get(loanAddr) : undefined;
       const ltvBpsVal = loanAddr !== undefined ? ltvByAddress.get(loanAddr) : undefined;
@@ -491,14 +650,19 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const previewVal = loanAddr !== undefined ? previewByAddress.get(loanAddr) : undefined;
       const outstandingVal = loanAddr !== undefined ? outstandingByAddress.get(loanAddr) : undefined;
       const priceAtFundingVal = loanAddr !== undefined ? priceAtFundingByAddress.get(loanAddr) : undefined;
+      const pendingWithdrawalVal = loanAddr !== undefined ? pendingWithdrawalByAddress.get(loanAddr) : undefined;
+      const requestedAtVal = loanAddr !== undefined ? requestedAtByAddress.get(loanAddr) : undefined;
+      const amountRepaidVal = loanAddr !== undefined ? amountRepaidByAddress.get(loanAddr) : undefined;
       return {
-        id, terms, statusVal, lenderAddr, isLiquidatableVal, repaymentDueAtVal,
-        ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal,
+        id, terms, statusVal, myContribution, totalContributedVal, minContributionVal, isLiquidatableVal, repaymentDueAtVal,
+        ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal, pendingWithdrawalVal,
+        requestedAtVal, amountRepaidVal,
       };
     });
   }, [
-    loanIds, termsResults, statusByAddress, lenderByAddress, isLiquidatableByAddress,
+    loanIds, termsResults, statusByAddress, myContributionByAddress, totalContributedByAddress, minContributionByAddress, isLiquidatableByAddress,
     repaymentDueAtByAddress, ltvByAddress, priceLiqByAddress, delinqLiqByAddress, previewByAddress, outstandingByAddress, priceAtFundingByAddress,
+    pendingWithdrawalByAddress, requestedAtByAddress, amountRepaidByAddress,
   ]);
 
   // Only settled loans are handed to the event indexer. An open or funded loan has no
@@ -529,52 +693,66 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
   // Expired requests are hidden rather than shown as unfundable. fund() reverts past
   // the seven-day window, so an expired card is an offer the chain will not honour.
   const openLoans = useMemo(
-    () => loans.filter((l) => l.statusVal === 0 && l.terms && !isExpired(l.terms.createdAt)),
+    () => loans.filter((l) => l.statusVal === 0 && l.terms && !isExpired(l.requestedAtVal)),
     [loans],
   );
 
-  // Matches against every authorised account, not just the active one. A user who funds
-  // from one MetaMask account and then switches to another would otherwise watch their
-  // own positions disappear from the dashboard. Falls back to the active address when
-  // the connector reports no account list.
-  const isMine = (lenderAddr: string | undefined) =>
-    lenderAddr !== undefined &&
-    (allAddresses.length > 0
-      ? allAddresses.includes(lenderAddr.toLowerCase())
-      : lenderAddr.toLowerCase() === address?.toLowerCase());
+  // Position ownership now follows contributions(activeAddress) > 0, so it
+  // only reflects the active connected account (see the narrowing comment on
+  // lenderContracts above), not every account in allAddresses.
+  const isMine = (contribution: bigint | undefined) => (contribution ?? 0n) > 0n;
 
   // Settled loans (Repaid / Liquidated) the user funded. Previously these were
   // filtered out entirely, so the moment a borrower repaid, the lender's position
   // vanished with no trace that it had ever existed or been paid back.
   const settledPositions = useMemo(
-    () => loans.filter((l) => (l.statusVal === 2 || l.statusVal === 4) && isMine(l.lenderAddr)),
-    [loans, allAddresses, address], // eslint-disable-line react-hooks/exhaustive-deps
+    () => loans.filter((l) => (l.statusVal === 2 || l.statusVal === 4) && isMine(l.myContribution)),
+    [loans],
   );
 
   const myPositions = useMemo(
+    () => loans.filter((l) => l.statusVal === 1 && isMine(l.myContribution)),
+    [loans],
+  );
+
+  // A loan is "mine" whenever contributions[me] > 0, with no status
+  // qualifier (design spec). Requested-status loans where I've already put
+  // money in fell through every other filter here: not Funded (myPositions),
+  // not settled, and reclaimableLoans only picks them up once the window has
+  // actually expired. Until then the money is real and escrowed, just not
+  // yet lent - shown separately from active (Funded) positions since it can
+  // still expire or be cancelled rather than earn interest.
+  const pendingContributions = useMemo(
+    () =>
+      loans.filter(
+        (l) => l.statusVal === 0 && l.terms && isMine(l.myContribution) && !isExpired(l.requestedAtVal),
+      ),
+    [loans],
+  );
+
+  // Shares a push transfer failed to deliver. Not scoped to myPositions -
+  // a loan can be Repaid/Liquidated (and gone from the active list) while
+  // still holding an undelivered share for this account.
+  const claimableLoans = useMemo(
+    () => loans.filter((l) => l.terms && (l.pendingWithdrawalVal ?? 0n) > 0n),
+    [loans],
+  );
+
+  // Pools that can no longer complete, where this account still has an
+  // escrowed contribution sitting in the contract: cancelled by the borrower,
+  // or the funding window ran out while still Requested.
+  const reclaimableLoans = useMemo(
     () =>
       loans.filter(
         (l) =>
-          l.statusVal === 1 &&
-          l.lenderAddr !== undefined &&
-          (allAddresses.length > 0
-            ? allAddresses.includes(l.lenderAddr.toLowerCase())
-            : l.lenderAddr.toLowerCase() === address?.toLowerCase()),
+          l.terms &&
+          isMine(l.myContribution) &&
+          (l.statusVal === 3 || (l.statusVal === 0 && isExpired(l.requestedAtVal))),
       ),
-    [loans, allAddresses, address],
+    [loans],
   );
 
-  /**
-   * Fund a request by sending the exact principal to its Loan contract.
-   *
-   * principalWei comes from the factory's stored terms rather than being recomputed
-   * here, because fund() requires the value to match to the wei and any client-side
-   * arithmetic on the way would eventually disagree with what was written on chain.
-   *
-   * Errors are tracked against a loan id so a failure shows on the card the user
-   * clicked rather than across the whole marketplace.
-   */
-  async function fundLoan(loanContractAddr: `0x${string}`, principalWei: bigint, loanId: bigint) {
+  async function contributeLoan(loanContractAddr: `0x${string}`, amountWei: bigint, loanId: bigint) {
     setFundingError(null);
     setFundingErrorLoanId(null);
     setFundingLoanId(loanId);
@@ -584,8 +762,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       const hash = await writeContractAsync({
         address: loanContractAddr,
         abi: LOAN_ABI,
-        functionName: 'fund',
-        value: principalWei,
+        functionName: 'contribute',
+        value: amountWei,
         chainId,
       });
       setFundingHash(hash);
@@ -597,13 +775,80 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
     }
   }
 
-  /**
-   * Call liquidate() on a position the contract has already judged liquidatable.
-   *
-   * The button is gated on isLiquidatable() read from the chain, not on the client-side
-   * countdown, so this never depends on the browser clock agreeing with block time. If
-   * the two disagree the transaction reverts and nothing is lost.
-   */
+  // Client-side check mirroring contribute()'s own require()s, so a bad
+  // amount fails with a readable message here instead of a wallet revert.
+  // over-contributing is deliberately NOT rejected - the contract caps what
+  // it accepts at the remaining gap and refunds the rest in the same tx.
+  function validateContribution(raw: string, minWei: bigint): { amountWei: bigint } | { error: string } {
+    const trimmed = raw.trim();
+    if (!trimmed) return { error: 'Enter an amount' };
+    let amountWei: bigint;
+    try {
+      amountWei = parseEther(trimmed);
+    } catch {
+      return { error: 'Enter a valid ETH amount' };
+    }
+    if (amountWei <= 0n) return { error: 'Amount must be greater than zero' };
+    if (amountWei < minWei) {
+      return { error: `Minimum contribution is ${formatEther(minWei)} ETH` };
+    }
+    return { amountWei };
+  }
+
+  // Withdraw and reclaim state is keyed per loan id (not a single shared
+  // scalar like fundingLoanId/liqLoanId above) so acting on one loan's card
+  // never reassigns or clobbers another card's in-flight tx feedback.
+  const [withdrawState, setWithdrawState] = useState<Record<string, TxState>>({});
+  const [reclaimState, setReclaimState] = useState<Record<string, TxState>>({});
+
+  async function withdrawLoan(loanContractAddr: `0x${string}`, loanId: bigint) {
+    const key = loanId.toString();
+    setWithdrawState((prev) => ({ ...prev, [key]: { status: 'pending' } }));
+    try {
+      await switchChainAsync({ chainId });
+      const hash = await writeContractAsync({
+        address: loanContractAddr,
+        abi: LOAN_ABI,
+        functionName: 'withdraw',
+        chainId,
+      });
+      setWithdrawState((prev) => ({ ...prev, [key]: { status: 'confirming', hash } }));
+      await waitForTransactionReceipt(wagmiConfig, { hash, chainId });
+      setWithdrawState((prev) => ({ ...prev, [key]: { status: 'confirmed', hash } }));
+      void refetchAll();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Transaction failed';
+      setWithdrawState((prev) => ({
+        ...prev,
+        [key]: { status: 'error', error: msg.length > 160 ? msg.slice(0, 157) + '…' : msg },
+      }));
+    }
+  }
+
+  async function reclaimLoan(loanContractAddr: `0x${string}`, loanId: bigint) {
+    const key = loanId.toString();
+    setReclaimState((prev) => ({ ...prev, [key]: { status: 'pending' } }));
+    try {
+      await switchChainAsync({ chainId });
+      const hash = await writeContractAsync({
+        address: loanContractAddr,
+        abi: LOAN_ABI,
+        functionName: 'reclaimContribution',
+        chainId,
+      });
+      setReclaimState((prev) => ({ ...prev, [key]: { status: 'confirming', hash } }));
+      await waitForTransactionReceipt(wagmiConfig, { hash, chainId });
+      setReclaimState((prev) => ({ ...prev, [key]: { status: 'confirmed', hash } }));
+      void refetchAll();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Transaction failed';
+      setReclaimState((prev) => ({
+        ...prev,
+        [key]: { status: 'error', error: msg.length > 160 ? msg.slice(0, 157) + '…' : msg },
+      }));
+    }
+  }
+
   async function liquidateLoan(loanContractAddr: `0x${string}`, loanId: bigint) {
     setLiqLoanId(loanId);
     setLiqHash(undefined);
@@ -671,9 +916,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             }`}
           >
             My Positions
-            {myPositions.length > 0 && (
+            {myPositions.length + pendingContributions.length > 0 && (
               <span className="ml-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-600 text-[10px] font-black text-white px-1">
-                {myPositions.length}
+                {myPositions.length + pendingContributions.length}
               </span>
             )}
           </button>
@@ -717,14 +962,14 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
               {/* Column headers */}
               <div className="hidden md:grid grid-cols-[2fr_1.2fr_1.2fr_1fr_1fr_auto] gap-3 px-5 text-[10px] font-bold text-slate-600 uppercase tracking-widest">
                 <span>Borrower / Tier</span>
-                <span>You send</span>
-                <span>You earn</span>
+                <span>Principal</span>
+                <span>Total interest</span>
                 <span>Duration</span>
                 <span>Current LTV</span>
-                <span />
+                <span>Funded</span>
               </div>
 
-              {openLoans.map(({ id, terms }) => {
+              {openLoans.map(({ id, terms, totalContributedVal, minContributionVal, myContribution, requestedAtVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -734,6 +979,42 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 const collateralEth = parseFloat(formatEther(terms.collateralAmount));
                 const principalUsd = ethPrice > 0 ? principalEth * ethPrice : null;
                 const collateralUsd = ethPrice > 0 ? collateralEth * ethPrice : null;
+
+                // Pooled funding progress. totalContributedVal is undefined only
+                // while the read is still in flight, not "zero" - but 0n is the
+                // correct starting value for a brand-new request either way.
+                const fundedWei = totalContributedVal ?? 0n;
+                const fundedPct =
+                  terms.principalAmount > 0n
+                    ? Number((fundedWei * 10_000n) / terms.principalAmount) / 100
+                    : 0;
+                const remainingWei =
+                  terms.principalAmount > fundedWei ? terms.principalAmount - fundedWei : 0n;
+                // Fallback mirrors the contract's own formula for the brief window
+                // before minContribution() resolves, so the input isn't blocked.
+                const minWei =
+                  minContributionVal ?? (terms.principalAmount / 100n === 0n ? 1n : terms.principalAmount / 100n);
+                // "Fill the rest" must be at least minWei even when the remaining
+                // gap is smaller than that - contribute() checks msg.value against
+                // minContribution() regardless of how much of it is actually needed,
+                // and refunds the surplus in the same transaction.
+                const remainingOrMinWei = remainingWei > minWei ? remainingWei : minWei;
+                // Quick-fill shortcuts, each floored at minWei for the same reason.
+                const quickFill25Wei = (() => {
+                  const v = (remainingWei * 25n) / 100n;
+                  return v > minWei ? v : minWei;
+                })();
+                const quickFill50Wei = (() => {
+                  const v = (remainingWei * 50n) / 100n;
+                  return v > minWei ? v : minWei;
+                })();
+                // Only true when the remaining gap is smaller than the minimum,
+                // meaning the Remaining quick-fill necessarily offers more than
+                // what's actually left (the contract floors at minWei and
+                // refunds the surplus) - the one case worth calling out.
+                const isNearFullEdgeCase = remainingWei > 0n && remainingWei < minWei;
+                const idKey = id.toString();
+                const contributionInput = contributionInputs[idKey] ?? formatEther(remainingOrMinWei);
 
                 // Origination LTV = principal / collateral. Price-independent by
                 // design (both legs are ETH) — correct for a not-yet-funded loan,
@@ -781,7 +1062,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                           )}
                         </div>
                         <span className="text-[11px] text-slate-500 font-mono">
-                          {timeLeft(terms.createdAt)}
+                          {timeLeft(requestedAtVal)}
                         </span>
                       </div>
                       <div className="grid grid-cols-2 gap-3 text-xs">
@@ -790,17 +1071,19 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                           <p className="font-mono text-white">{terms.borrower.slice(0, 8)}…{terms.borrower.slice(-6)}</p>
                         </div>
                         <div>
-                          <p className="text-slate-600 text-[10px]">You send</p>
+                          <p className="text-slate-600 text-[10px]">Principal</p>
                           <p className="font-mono font-bold text-white">{principalEth.toFixed(4)} ETH</p>
                           {principalUsd && <p className="text-slate-500">{formatUsd(principalUsd)}</p>}
                         </div>
                       </div>
-                      <FundButton
-                        isTxInFlight={isTxInFlight}
-                        isTxDone={isTxDone}
-                        isSelf={isSelfLoan}
-                        onFund={() => void fundLoan(terms.loanContract, terms.principalAmount, id)}
-                      />
+                      {isSelfLoan && (
+                        <div
+                          className="inline-flex h-7 px-3 rounded-lg border border-slate-700 bg-slate-900/50 items-center text-[11px] font-bold text-slate-600 whitespace-nowrap cursor-not-allowed"
+                          title="You cannot fund your own loan request"
+                        >
+                          Your request
+                        </div>
+                      )}
                     </div>
 
                     {/* Desktop layout */}
@@ -813,7 +1096,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                               Tier {tier}
                             </span>
                           )}
-                          <span className="text-[10px] text-slate-600">{timeLeft(terms.createdAt)}</span>
+                          <span className="text-[10px] text-slate-600">{timeLeft(requestedAtVal)}</span>
                         </div>
                         <p className="text-xs font-mono text-slate-400 truncate">
                           {terms.borrower.slice(0, 10)}…{terms.borrower.slice(-8)}
@@ -853,12 +1136,16 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         )}
                       </div>
 
-                      <FundButton
-                        isTxInFlight={isTxInFlight}
-                        isTxDone={isTxDone}
-                        isSelf={isSelfLoan}
-                        onFund={() => void fundLoan(terms.loanContract, terms.principalAmount, id)}
-                      />
+                      <div className="text-right">
+                        {isSelfLoan ? (
+                          <span className="text-[11px] font-bold text-slate-600 whitespace-nowrap">Your request</span>
+                        ) : (
+                          <>
+                            <p className="text-sm font-mono font-bold text-emerald-400">{fundedPct.toFixed(0)}%</p>
+                            <p className="text-[10px] text-slate-600">funded</p>
+                          </>
+                        )}
+                      </div>
                     </div>
 
                     {/* Collateral detail row */}
@@ -881,6 +1168,123 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       </a>
                     </div>
 
+                    {/* Funding progress + contribute control */}
+                    <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500 mb-1.5">
+                        <span>Funding progress</span>
+                        <span className="font-mono text-slate-400">
+                          {parseFloat(formatEther(fundedWei)).toFixed(4)} / {principalEth.toFixed(4)} ETH funded
+                        </span>
+                      </div>
+                      <div className="relative h-2.5 w-full rounded-full bg-slate-800 overflow-hidden mb-3">
+                        <div
+                          className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                          style={{ width: `${Math.min(fundedPct, 100)}%` }}
+                        />
+                      </div>
+
+                      {isMine(myContribution) && (
+                        <p className="text-[11px] font-bold text-emerald-400 mb-2">
+                          You&apos;ve already contributed{' '}
+                          <span className="font-mono">
+                            {parseFloat(formatEther(myContribution ?? 0n)).toFixed(4)} ETH
+                          </span>{' '}
+                          to this request - it stays escrowed here until the pool fills, expires, or is cancelled.
+                        </p>
+                      )}
+
+                      {isSelfLoan ? (
+                        <p className="text-[11px] font-bold text-slate-600">
+                          You cannot fund your own loan request.
+                        </p>
+                      ) : isTxDone ? (
+                        <div className="flex items-center gap-2 text-xs font-bold text-emerald-400">
+                          <Check className="h-3.5 w-3.5" /> Contribution sent
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.000001"
+                              value={contributionInput}
+                              onChange={(e) =>
+                                setContributionInputs((prev) => ({ ...prev, [idKey]: e.target.value }))
+                              }
+                              placeholder="Amount in ETH"
+                              className="h-9 w-40 rounded-lg border border-slate-700 bg-slate-900 px-3 text-xs font-mono text-white focus:outline-none focus:border-blue-500/60"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setContributionInputs((prev) => ({ ...prev, [idKey]: formatEther(quickFill25Wei) }))
+                              }
+                              disabled={isTxInFlight}
+                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              25%
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setContributionInputs((prev) => ({ ...prev, [idKey]: formatEther(quickFill50Wei) }))
+                              }
+                              disabled={isTxInFlight}
+                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              50%
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setContributionInputs((prev) => ({ ...prev, [idKey]: formatEther(remainingOrMinWei) }))
+                              }
+                              disabled={isTxInFlight}
+                              className="h-9 px-3 rounded-lg border border-slate-700 text-[11px] font-bold text-slate-400 hover:text-white hover:border-slate-500 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              Remaining
+                            </button>
+                            <button
+                              onClick={() => {
+                                const result = validateContribution(contributionInput, minWei);
+                                if ('error' in result) {
+                                  setFundingError(result.error);
+                                  setFundingErrorLoanId(id);
+                                  return;
+                                }
+                                void contributeLoan(terms.loanContract, result.amountWei, id);
+                              }}
+                              disabled={isTxInFlight}
+                              className="h-9 px-4 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap shadow-lg shadow-blue-500/20"
+                            >
+                              {isTxInFlight ? (
+                                <>
+                                  <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                                  {isFundConfirming ? 'Confirming…' : 'Confirm…'}
+                                </>
+                              ) : (
+                                'Contribute'
+                              )}
+                            </button>
+                          </div>
+                          {isNearFullEdgeCase ? (
+                            <p className="text-[10px] text-amber-400/90 mt-1.5 rounded-lg border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5">
+                              Only <span className="font-mono">{formatEther(remainingWei)} ETH</span> is left to fund this loan, but the minimum contribution is{' '}
+                              <span className="font-mono">{formatEther(minWei)} ETH</span>. The Remaining button offers{' '}
+                              <span className="font-mono">{formatEther(remainingOrMinWei)} ETH</span> - the extra{' '}
+                              <span className="font-mono">{formatEther(minWei - remainingWei)} ETH</span> comes back automatically.
+                            </p>
+                          ) : (
+                            <p className="text-[10px] text-slate-700 mt-1.5">
+                              Minimum contribution: <span className="font-mono text-slate-500">{formatEther(minWei)} ETH</span>.
+                              {' '}Sending more than what is left is fine, the contract only takes what is needed and refunds the rest.
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+
                     {/* Why this tier + what protects the lender, before they commit capital */}
                     <div className="mt-3">
                       <LoanSafetyPanel
@@ -892,7 +1296,14 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         currentLtv={currentLtv}
                         collateralUsd={collateralUsd}
                         principalUsd={principalUsd}
+                        myShareFrac={
+                          myContribution && terms.principalAmount > 0n
+                            ? Number(myContribution) / Number(terms.principalAmount)
+                            : 0
+                        }
                         assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
+                        borrower={terms.borrower}
+                        chainId={chainId}
                       />
                     </div>
 
@@ -905,7 +1316,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         {isFundConfirmed && <Check className="h-4 w-4 text-emerald-400 flex-shrink-0" />}
                         <div>
                           <p className="text-xs font-bold text-white">
-                            {isFundConfirmed ? 'Loan funded!' : 'Confirming…'}
+                            {!isFundConfirmed
+                              ? 'Confirming…'
+                              : remainingWei === 0n
+                              ? 'Loan funded!'
+                              : 'Contribution confirmed'}
                           </p>
                           <a
                             href={`https://sepolia.etherscan.io/tx/${fundingHash}`}
@@ -933,9 +1348,9 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
             <ol className="space-y-2">
               {[
                 { n: '1', text: 'Browse open requests. Borrowers have already locked collateral.' },
-                { n: '2', text: 'Click Fund to send the exact principal amount. Your ETH goes directly to the borrower.' },
+                { n: '2', text: 'Contribute any amount at or above the minimum. Several lenders can fund the same loan; once contributions reach the full principal, it goes to the borrower.' },
                 { n: '3', text: 'The borrower repays principal + interest within the loan duration' },
-                { n: '4', text: 'Repayment is sent to your wallet. Their collateral is released.' },
+                { n: '4', text: 'Repayment is sent to your wallet, split by your share of the pool. Their collateral is released.' },
                 { n: '5', text: "If the borrower misses the repayment deadline (plus a short grace period), Liquidate becomes available to seize their collateral." },
               ].map(({ n, text }) => (
                 <li key={n} className="flex items-start gap-3">
@@ -956,19 +1371,183 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
       {/* ── My Positions Tab ── */}
       {!isLoading && activeTab === 'positions' && (
         <>
-          {myPositions.length === 0 ? (
+          {/* Claim banner - undelivered shares. Shown above everything else,
+              regardless of whether the loan still has an active position,
+              since money can be waiting here even on an already-settled loan. */}
+          {claimableLoans.length > 0 && (
+            <div className="space-y-2">
+              {claimableLoans.map((l) => {
+                if (!l.terms) return null;
+                const key = l.id.toString();
+                const amountWei = l.pendingWithdrawalVal ?? 0n;
+                const tx = withdrawState[key];
+                const isBusy = tx?.status === 'pending' || tx?.status === 'confirming';
+                return (
+                  <div
+                    key={key}
+                    className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 flex flex-wrap items-center gap-3"
+                  >
+                    <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0" />
+                    <p className="text-xs font-bold text-amber-200">
+                      <span className="font-mono">{parseFloat(formatEther(amountWei)).toFixed(6)} ETH</span> from
+                      loan #{key} could not be delivered to your wallet automatically.
+                    </p>
+                    <button
+                      onClick={() => void withdrawLoan(l.terms!.loanContract, l.id)}
+                      disabled={isBusy}
+                      className="ml-auto h-8 px-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+                    >
+                      {isBusy ? (
+                        <>
+                          <span className="h-3 w-3 rounded-full border-2 border-slate-950 border-t-transparent animate-spin" />
+                          {tx?.status === 'confirming' ? 'Confirming…' : 'Confirm…'}
+                        </>
+                      ) : tx?.status === 'confirmed' ? (
+                        'Claimed'
+                      ) : (
+                        'Claim it'
+                      )}
+                    </button>
+                    {tx?.hash && (
+                      <a
+                        href={`https://sepolia.etherscan.io/tx/${tx.hash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-full text-[10px] font-mono text-blue-500 hover:text-blue-400"
+                      >
+                        {tx.hash.slice(0, 18)}… ↗
+                      </a>
+                    )}
+                    {tx?.status === 'error' && tx.error && (
+                      <p className="w-full text-[11px] text-red-400 font-mono break-all">{tx.error}</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Reclaim section - dead pools (cancelled, or expired while still
+              Requested) where this account has an escrowed contribution. */}
+          {reclaimableLoans.length > 0 && (
+            <div className="space-y-2">
+              {reclaimableLoans.map((l) => {
+                if (!l.terms) return null;
+                const key = l.id.toString();
+                const cancelled = l.statusVal === 3;
+                const myContribEth =
+                  l.myContribution !== undefined ? parseFloat(formatEther(l.myContribution)) : null;
+                const tx = reclaimState[key];
+                const isBusy = tx?.status === 'pending' || tx?.status === 'confirming';
+                return (
+                  <div
+                    key={key}
+                    className="rounded-xl border border-slate-700 bg-slate-900/50 px-4 py-3 flex flex-wrap items-center gap-3"
+                  >
+                    <p className="text-xs text-slate-300">
+                      <span className="font-mono text-slate-600">#{key}</span>{' '}
+                      {cancelled
+                        ? 'This request was cancelled by the borrower'
+                        : 'This request expired'}{' '}
+                      before funding completed. Your{' '}
+                      <span className="font-mono font-bold text-white">
+                        {myContribEth !== null ? myContribEth.toFixed(4) : '…'} ETH
+                      </span>{' '}
+                      contribution is waiting in the contract.
+                    </p>
+                    <button
+                      onClick={() => void reclaimLoan(l.terms!.loanContract, l.id)}
+                      disabled={isBusy}
+                      className="ml-auto h-8 px-3 rounded-lg border border-slate-600 hover:border-slate-400 text-xs font-bold text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+                    >
+                      {isBusy ? (
+                        <>
+                          <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                          {tx?.status === 'confirming' ? 'Confirming…' : 'Confirm…'}
+                        </>
+                      ) : tx?.status === 'confirmed' ? (
+                        'Reclaimed'
+                      ) : (
+                        'Reclaim'
+                      )}
+                    </button>
+                    {tx?.hash && (
+                      <a
+                        href={`https://sepolia.etherscan.io/tx/${tx.hash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-full text-[10px] font-mono text-blue-500 hover:text-blue-400"
+                      >
+                        {tx.hash.slice(0, 18)}… ↗
+                      </a>
+                    )}
+                    {tx?.status === 'error' && tx.error && (
+                      <p className="w-full text-[11px] text-red-400 font-mono break-all">{tx.error}</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Pending contributions - status 0 (Requested) loans where I've
+              already contributed but the pool hasn't filled yet. A loan is
+              "mine" the moment contributions[me] > 0, regardless of status
+              (design spec) - this money is real and escrowed, but not yet
+              lent, so it's shown apart from the active (Funded) positions
+              below rather than mixed in with them. */}
+          {pendingContributions.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">
+                Pending contributions ({pendingContributions.length})
+              </p>
+              {pendingContributions.map((l) => {
+                if (!l.terms) return null;
+                const key = l.id.toString();
+                const myContribEth =
+                  l.myContribution !== undefined ? parseFloat(formatEther(l.myContribution)) : null;
+                const principalEth = parseFloat(formatEther(l.terms.principalAmount));
+                const fundedWei = l.totalContributedVal ?? 0n;
+                const fundedPct =
+                  l.terms.principalAmount > 0n
+                    ? Number((fundedWei * 10_000n) / l.terms.principalAmount) / 100
+                    : 0;
+                return (
+                  <div
+                    key={key}
+                    className="rounded-xl border border-blue-500/20 bg-blue-500/5 px-4 py-3 space-y-1.5"
+                  >
+                    <p className="text-xs text-slate-300">
+                      <span className="font-mono text-slate-600">#{key}</span>{' '}
+                      You&apos;ve contributed{' '}
+                      <span className="font-mono font-bold text-white">
+                        {myContribEth !== null ? myContribEth.toFixed(4) : '…'} ETH
+                      </span>{' '}
+                      to this request. It is escrowed in the contract, not yet lent - the pool is{' '}
+                      <span className="font-mono">{fundedPct.toFixed(0)}%</span> funded of{' '}
+                      <span className="font-mono">{principalEth.toFixed(4)} ETH</span>, and this money earns
+                      nothing until the pool fills. It can still expire ({timeLeft(l.requestedAtVal)}) or be
+                      cancelled by the borrower, either of which unlocks it for reclaim.
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {myPositions.length === 0 && pendingContributions.length === 0 ? (
             <div className="rounded-2xl border border-slate-800 bg-[#111827] py-16 text-center">
               <div className="inline-flex h-14 w-14 items-center justify-center rounded-full border border-dashed border-slate-700 mb-4">
                 <TrendingUp className="h-7 w-7 text-slate-700" />
               </div>
               <p className="text-sm font-bold text-slate-500">No active positions</p>
               <p className="text-xs text-slate-700 mt-1 max-w-xs mx-auto">
-                Fund a loan request to see your position here.
+                Contribute to a loan request to see your position here.
               </p>
             </div>
-          ) : (
+          ) : myPositions.length === 0 ? null : (
             <div className="space-y-3">
-              {myPositions.map(({ id, terms, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal }) => {
+              {myPositions.map(({ id, terms, myContribution, isLiquidatableVal, repaymentDueAtVal, ltvBpsVal, priceLiqVal, delinqLiqVal, previewVal, outstandingVal, priceAtFundingVal, amountRepaidVal }) => {
                 if (!terms) return null;
                 const tier = inferRiskTierFromBps(Number(terms.maxLtvBps));
                 const tierCfg = tier ? RISK_TIER_CONFIG[tier] : null;
@@ -978,6 +1557,21 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 const collateralEth = parseFloat(formatEther(terms.collateralAmount));
                 const principalUsd = ethPrice > 0 ? principalEth * ethPrice : null;
                 const collateralUsd = ethPrice > 0 ? collateralEth * ethPrice : null;
+
+                // Pooled funding: this position may only be a fraction of the
+                // principal, not the whole loan. "You funded" and "Interest to
+                // earn" below must reflect that share, not the full loan.
+                const myContribEth = myContribution !== undefined ? parseFloat(formatEther(myContribution)) : null;
+                const myContribUsd = myContribEth !== null && ethPrice > 0 ? myContribEth * ethPrice : null;
+                const myShareFrac =
+                  myContribution !== undefined && terms.principalAmount > 0n
+                    ? Number(myContribution) / Number(terms.principalAmount)
+                    : 0;
+                // Basis-point precision share, for the "Your share: X%" readout.
+                const myShareBps =
+                  myContribution !== undefined && terms.principalAmount > 0n
+                    ? (myContribution * 10_000n) / terms.principalAmount
+                    : null;
 
                 // LTV read from the contract (frozen USD debt / live USD collateral).
                 // 0 means "unknown" (no oracle data), not "healthy" — fall back to
@@ -993,7 +1587,7 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
 
                 const interestEarned =
                   principalUsd !== null
-                    ? principalUsd * (aprNum / 100) * (Number(terms.durationDays) / 365)
+                    ? principalUsd * myShareFrac * (aprNum / 100) * (Number(terms.durationDays) / 365)
                     : null;
 
                 const isLiquidating = liqLoanId === id;
@@ -1018,17 +1612,21 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       (Number(formatEther(terms.collateralAmount)) * thresholdFrac)
                     : null;
 
-                const outstandingEth =
-                  outstandingVal !== undefined ? parseFloat(formatEther(outstandingVal)) : null;
-                const repaidSoFarEth =
-                  outstandingVal !== undefined
-                    ? Math.max(
-                        0,
-                        parseFloat(formatEther(terms.principalAmount)) +
-                          (previewVal ? 0 : 0) -
-                          outstandingEth!,
-                      )
-                    : null;
+                // "Still owed to you", "Repaid so far" and "If you liquidated
+                // now" are this lender's pro-rata slice of the loan-wide
+                // figures, scaled with the same mulDiv-style bigint math the
+                // contract itself uses to split every repayment and seizure -
+                // never via a float intermediate.
+                const myOutstandingWei = myShareOfWei(outstandingVal, myContribution, terms.principalAmount);
+                // amountRepaid() is the contract's own cumulative-paid figure.
+                // principalAmount - outstandingBalance() looks similar but
+                // understates it by whatever interest has accrued so far,
+                // since outstandingBalance() grows with interest between
+                // payments while amountRepaid() does not.
+                const myRepaidSoFarWei = myShareOfWei(amountRepaidVal, myContribution, terms.principalAmount);
+                const mySeizeWei = previewVal
+                  ? myShareOfWei(previewVal.seize, myContribution, terms.principalAmount)
+                  : null;
                 const dueDate =
                   repaymentDueAtVal !== undefined
                     ? new Date(Number(repaymentDueAtVal) * 1000).toLocaleDateString('en-US', {
@@ -1078,8 +1676,17 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       </div>
                       <div>
                         <p className="text-[10px] text-slate-600">You funded</p>
-                        <p className="text-sm font-mono font-bold text-white">{principalEth.toFixed(4)} ETH</p>
-                        {principalUsd && <p className="text-[11px] text-slate-500">{formatUsd(principalUsd)}</p>}
+                        <p className="text-sm font-mono font-bold text-white">
+                          {myContribEth !== null ? myContribEth.toFixed(4) : '…'} ETH
+                        </p>
+                        {myContribUsd && <p className="text-[11px] text-slate-500">{formatUsd(myContribUsd)}</p>}
+                        <p className="text-[10px] text-slate-700">
+                          Your share:{' '}
+                          <span className="font-mono text-slate-500">
+                            {myShareBps !== null ? (Number(myShareBps) / 100).toFixed(2) : '…'}%
+                          </span>{' '}
+                          ({myContribEth !== null ? myContribEth.toFixed(4) : '…'} / {principalEth.toFixed(4)} ETH)
+                        </p>
                       </div>
                       <div>
                         <p className="text-[10px] text-slate-600">Interest to earn</p>
@@ -1132,21 +1739,21 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         <div>
                           <p className="text-[10px] text-slate-600">Still owed to you</p>
                           <p className="text-sm font-mono font-bold text-amber-400">
-                            {outstandingEth !== null ? `${outstandingEth.toFixed(6)} ETH` : '…'}
+                            {myOutstandingWei !== null ? `${parseFloat(formatEther(myOutstandingWei)).toFixed(6)} ETH` : '…'}
                           </p>
-                          <p className="text-[10px] text-slate-700">principal + interest so far</p>
+                          <p className="text-[10px] text-slate-700">your share of principal + interest so far</p>
                         </div>
                         <div>
                           <p className="text-[10px] text-slate-600">Repaid so far</p>
                           <p className="text-sm font-mono font-bold text-emerald-400">
-                            {repaidSoFarEth !== null ? `${repaidSoFarEth.toFixed(6)} ETH` : '…'}
+                            {myRepaidSoFarWei !== null ? `${parseFloat(formatEther(myRepaidSoFarWei)).toFixed(6)} ETH` : '…'}
                           </p>
-                          <p className="text-[10px] text-slate-700">already in your wallet</p>
+                          <p className="text-[10px] text-slate-700">your share, already in your wallet</p>
                         </div>
                         <div>
                           <p className="text-[10px] text-slate-600">If you liquidated now</p>
                           <p className="text-sm font-mono font-bold text-white">
-                            {previewVal ? `${parseFloat(formatEther(previewVal.seize)).toFixed(6)} ETH` : '…'}
+                            {mySeizeWei !== null ? `${parseFloat(formatEther(mySeizeWei)).toFixed(6)} ETH` : '…'}
                           </p>
                           <p className="text-[10px] text-slate-700">
                             {previewVal
@@ -1197,8 +1804,11 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                         currentLtv={currentLtv}
                         collateralUsd={collateralUsd}
                         principalUsd={principalUsd}
+                        myShareFrac={myShareFrac}
                         isLiquidatable={canLiquidate}
                         assessment={assessments[terms.loanContract.toLowerCase()] ?? null}
+                        borrower={terms.borrower}
+                        chainId={chainId}
                       />
                     </div>
 
@@ -1228,8 +1838,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       </button>
                       <span className="text-[10px] text-slate-700">
                         {canLiquidate
-                          ? previewVal
-                            ? `Recovers ${parseFloat(formatEther(previewVal.seize)).toFixed(6)} ETH (what you're owed). The remaining ${parseFloat(formatEther(previewVal.refund)).toFixed(6)} ETH goes back to the borrower.`
+                          ? previewVal && mySeizeWei !== null
+                            ? `Recovers ${parseFloat(formatEther(mySeizeWei)).toFixed(6)} ETH (your share of what's owed). The pool's total seizure is ${parseFloat(formatEther(previewVal.seize)).toFixed(6)} ETH; the remaining ${parseFloat(formatEther(previewVal.refund)).toFixed(6)} ETH goes back to the borrower.`
                             : 'Recovers only what you are owed; the surplus returns to the borrower.'
                           : countdown ?? 'Not yet liquidatable.'}
                       </span>
@@ -1260,11 +1870,16 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                 Completed ({settledPositions.length})
               </p>
               <div className="space-y-2">
-                {settledPositions.map(({ id, terms, statusVal }) => {
+                {settledPositions.map(({ id, terms, statusVal, myContribution, previewVal }) => {
                   if (!terms) return null;
                   const repaid = statusVal === 2;
-                  const principalEth = parseFloat(formatEther(terms.principalAmount));
-                  const collateralEth = parseFloat(formatEther(terms.collateralAmount));
+                  const myContribEth = myContribution !== undefined ? parseFloat(formatEther(myContribution)) : null;
+                  // Frozen at liquidation time (Loan.sol stops interest accrual at
+                  // closedAt once the loan is no longer Funded), so this is the
+                  // actual pro-rata seizure, not a live estimate.
+                  const mySeizeWei = previewVal
+                    ? myShareOfWei(previewVal.seize, myContribution, terms.principalAmount)
+                    : null;
                   return (
                     <div
                       key={id.toString()}
@@ -1280,10 +1895,17 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                       </span>
                       <span className="text-[11px] text-slate-500">
                         {repaid ? (
-                          <>Borrower repaid — you received your {principalEth.toFixed(4)} ETH plus interest.</>
+                          <>Borrower repaid - you received your {myContribEth !== null ? myContribEth.toFixed(4) : '…'} ETH contribution plus interest.</>
                         ) : (
-                          <>You seized {collateralEth.toFixed(4)} ETH of collateral.</>
+                          <>
+                            You seized{' '}
+                            {mySeizeWei !== null ? parseFloat(formatEther(mySeizeWei)).toFixed(4) : '…'} ETH of
+                            collateral (your share).
+                          </>
                         )}
+                      </span>
+                      <span className="text-[10px] text-slate-700">
+                        Liq. buffer: {formatPercent(Number(terms.liquidationBufferBps) / 10_000)}
                       </span>
                       <a
                         href={`https://sepolia.etherscan.io/address/${terms.loanContract}`}
@@ -1302,6 +1924,8 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
                           events={eventsByLoan.get(terms.loanContract.toLowerCase()) ?? []}
                           statusVal={statusVal ?? 2}
                           priceFor={priceFor}
+                          viewerAddress={address}
+                          myContribution={myContribution}
                         />
                       </div>
                     </div>
@@ -1313,51 +1937,5 @@ export function LenderDashboard({ factoryAddress, ethPrice, networkMode = 'testn
         </>
       )}
     </div>
-  );
-}
-
-function FundButton({
-  isTxInFlight,
-  isTxDone,
-  isSelf,
-  onFund,
-}: {
-  isTxInFlight: boolean;
-  isTxDone: boolean;
-  isSelf: boolean;
-  onFund: () => void;
-}) {
-  if (isSelf) {
-    return (
-      <div
-        className="h-9 px-4 rounded-xl border border-slate-700 bg-slate-900/50 flex items-center text-[11px] font-bold text-slate-600 whitespace-nowrap cursor-not-allowed"
-        title="You cannot fund your own loan request"
-      >
-        Your request
-      </div>
-    );
-  }
-  if (isTxDone) {
-    return (
-      <div className="h-9 px-4 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center gap-2 text-xs font-bold text-emerald-400">
-        <Check className="h-3.5 w-3.5" /> Funded
-      </div>
-    );
-  }
-  return (
-    <button
-      onClick={onFund}
-      disabled={isTxInFlight}
-      className="h-9 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap shadow-lg shadow-blue-500/20"
-    >
-      {isTxInFlight ? (
-        <>
-          <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
-          Funding…
-        </>
-      ) : (
-        'Fund Loan →'
-      )}
-    </button>
   );
 }

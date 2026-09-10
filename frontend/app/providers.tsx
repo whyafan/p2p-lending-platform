@@ -5,6 +5,7 @@ import { type State, WagmiProvider } from 'wagmi';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import { getConfig } from './wagmi-config';
 import { createClient } from '../lib/supabase/client';
+import { REALTIME_QUERY_DEFAULTS } from '../lib/query-defaults.ts';
 
 type ProvidersProps = {
   children: ReactNode;
@@ -58,12 +59,7 @@ export function Providers({ children, initialState }: ProvidersProps) {
     () =>
       new QueryClient({
         defaultOptions: {
-          queries: {
-            refetchIntervalInBackground: true,
-            refetchOnWindowFocus: true,
-            staleTime: 0,
-            retry: 1,
-          },
+          queries: REALTIME_QUERY_DEFAULTS,
         },
       }),
   );

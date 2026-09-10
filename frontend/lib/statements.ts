@@ -12,6 +12,14 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import type { LoanEvent } from './loan-events';
 import { EVENT_LABEL } from './loan-events';
+import {
+  hasShareData,
+  myShareEvents,
+  OUTBOUND_KINDS,
+  splitSharesByLiquidation,
+  sumAmounts,
+  viewerLedgerEvents,
+} from './share-math.ts';
 
 export type StatementRole = 'lender' | 'borrower';
 
@@ -25,6 +33,16 @@ export type StatementLoan = {
   statusVal: number;
   counterparty?: string;
   events: LoanEvent[];
+  /**
+   * This viewer's own `contributions(address)` read from the contract, when
+   * known. `loan.events` is period-filtered by the caller (StatementsPanel),
+   * so summing `contribution` events for a cost basis silently collapses to
+   * zero the moment the viewer's contribution fell outside the reporting
+   * window while their share payout stayed inside it (C1). This is the
+   * authoritative value read straight off the contract - always the full
+   * amount, regardless of the period filter.
+   */
+  myContribution?: bigint;
 };
 
 export type StatementMeta = {
@@ -45,10 +63,16 @@ const ETH = (w: bigint) => parseFloat(formatEther(w));
 const fmtEth = (w: bigint) => ETH(w).toFixed(8);
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
 const dt = (ts?: number) => (ts ? new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 19) : '—');
+// A pending ShareDistributed hasn't actually reached the lender - the push
+// failed and it's sitting in pendingWithdrawals until withdraw() is called.
+// Printing it as plain "Share paid out" reads as money already received.
+const eventLabel = (e: LoanEvent) =>
+  e.kind === 'share-distributed' && e.pending ? `${EVENT_LABEL[e.kind]} (pending)` : EVENT_LABEL[e.kind];
 
 /**
  * Net position on one loan, from the perspective of `role`.
  *
+<<<<<<< HEAD
  * The two sides are not mirror images, because collateral only ever moves on the
  * borrower's side. A lender's ledger is the principal out against repayments and any
  * seizure in. The borrower's counts the collateral as an outflow when it is posted and
@@ -60,13 +84,22 @@ const dt = (ts?: number) => (ts ? new Date(ts * 1000).toISOString().replace('T',
  * tradebook row for row and each one has a transaction hash behind it.
  */
 export function computeLoanPnl(loan: StatementLoan, role: StatementRole) {
+=======
+ * For a lender on a pooled loan, `viewerAddress` picks out their own
+ * ShareDistributed events rather than the loan's totals - the fallback gate
+ * is `hasShareData(loan.events)`: with no ShareDistributed events at all (an
+ * old loan, or one the indexer hasn't caught up to), this reverts to the
+ * original loan-level computation unchanged.
+ */
+export function computeLoanPnl(loan: StatementLoan, role: StatementRole, viewerAddress?: string) {
+>>>>>>> atharva
   const zero = BigInt(0);
   const repayments = loan.events.filter(
     (e) => e.kind === 'partial-repayment' || e.kind === 'repaid',
   );
-  const totalRepaid = repayments.reduce((s, e) => s + e.amount, zero);
+  const totalRepaidLoanWide = repayments.reduce((s, e) => s + e.amount, zero);
   const liq = loan.events.find((e) => e.kind === 'liquidated');
-  const seized = liq?.amount ?? zero;
+  const seizedLoanWide = liq?.amount ?? zero;
   const refunded = liq?.refunded ?? zero;
   // Status comes from the contract, not from the presence of a liquidation event: a
   // chunk of logs that failed to fetch would otherwise silently reclassify a
@@ -74,20 +107,45 @@ export function computeLoanPnl(loan: StatementLoan, role: StatementRole) {
   const liquidated = loan.statusVal === 4;
 
   if (role === 'lender') {
+    const usePerShare = Boolean(viewerAddress) && hasShareData(loan.events);
+    if (usePerShare) {
+      const addr = (viewerAddress as string).toLowerCase();
+      const mine = myShareEvents(loan.events, viewerAddress as string);
+      const { seizureShares, repaymentShares } = splitSharesByLiquidation(mine, liq?.txHash);
+      // Prefer the contract-read value (C1): it is unaffected by the caller's
+      // period filter. Only fall back to summing contribution events - which
+      // can be wrongly filtered out of range - when it wasn't supplied.
+      const myContribution =
+        loan.myContribution ??
+        sumAmounts(loan.events.filter((e) => e.kind === 'contribution' && e.actor?.toLowerCase() === addr));
+      const totalRepaid = sumAmounts(repaymentShares);
+      const seized = sumAmounts(seizureShares);
+      const outflow = myContribution;
+      const inflow = totalRepaid + seized;
+      return { outflow, inflow, net: inflow - outflow, liquidated, totalRepaid, seized, refunded };
+    }
     const outflow = loan.principal;
-    const inflow = totalRepaid + seized;
-    return { outflow, inflow, net: inflow - outflow, liquidated, totalRepaid, seized, refunded };
+    const inflow = totalRepaidLoanWide + seizedLoanWide;
+    return {
+      outflow,
+      inflow,
+      net: inflow - outflow,
+      liquidated,
+      totalRepaid: totalRepaidLoanWide,
+      seized: seizedLoanWide,
+      refunded,
+    };
   }
-  // Borrower: received principal; paid repayments and any collateral not returned.
+  // Borrower: received principal; paid repayments and any collateral not returned. Unchanged by T8.
   const collateralLost = liquidated ? loan.collateral - refunded : zero;
   const inflow = loan.principal + (liquidated ? refunded : loan.collateral);
-  const outflow = totalRepaid + loan.collateral;
+  const outflow = totalRepaidLoanWide + loan.collateral;
   return {
     outflow,
     inflow,
     net: inflow - outflow,
     liquidated,
-    totalRepaid,
+    totalRepaid: totalRepaidLoanWide,
     seized: collateralLost,
     refunded,
   };
@@ -141,8 +199,16 @@ export function generateTradebook(loans: StatementLoan[], meta: StatementMeta): 
 
   let estimated = false;
   const rows = loans
-    .flatMap((loan) =>
-      loan.events.map((e) => {
+    .flatMap((loan) => {
+      // Lender: this lender's own contribution/share/withdrawal/reclaim events,
+      // plus the loan's lifecycle events (funded/repaid/liquidated) kept as
+      // context (I4) - not other lenders' individual slices - once the loan
+      // has per-share data. Borrower rows are unchanged.
+      const events =
+        meta.role === 'lender'
+          ? viewerLedgerEvents(loan.events, meta.walletAddress, { keepLifecycle: true })
+          : loan.events;
+      return events.map((e) => {
         const p = meta.priceFor(e);
         if (p.estimated) estimated = true;
         return {
@@ -150,17 +216,22 @@ export function generateTradebook(loans: StatementLoan[], meta: StatementMeta): 
           row: [
             dt(e.timestamp),
             `#${loan.loanId}`,
-            EVENT_LABEL[e.kind],
+            eventLabel(e),
             fmtEth(e.amount),
             p.usd ? `${fmtUsd(ETH(e.amount) * p.usd)}${p.estimated ? ' (est.)' : ''}` : '—',
             e.kind === 'liquidated' && e.refunded !== undefined ? fmtEth(e.refunded) : '',
             e.txHash,
           ],
         };
+<<<<<<< HEAD
       }),
     )
     // Sorted across all loans, not within each one: a tradebook is a chronological
     // ledger of what the account did, so two loans running concurrently interleave.
+=======
+      });
+    })
+>>>>>>> atharva
     .sort((a, b) => a.ts - b.ts)
     .map((r) => r.row);
 
@@ -195,12 +266,15 @@ export function generatePnl(loans: StatementLoan[], meta: StatementMeta): jsPDF 
   const zero = BigInt(0);
   let totalNet = zero;
   const body = loans.map((loan) => {
-    const p = computeLoanPnl(loan, meta.role);
+    const p = computeLoanPnl(loan, meta.role, meta.walletAddress);
     totalNet += p.net;
     return [
       `#${loan.loanId}`,
       loan.statusVal === 4 ? 'Liquidated' : loan.statusVal === 2 ? 'Repaid' : 'Open',
-      fmtEth(loan.principal),
+      // Lender's own contribution once per-share data exists (p.outflow),
+      // not the whole pool's principal - mirrors pre-pooling behaviour where
+      // the two were always equal for a loan's sole lender.
+      meta.role === 'lender' ? fmtEth(p.outflow) : fmtEth(loan.principal),
       fmtEth(p.totalRepaid),
       p.liquidated ? fmtEth(p.seized) : '—',
       fmtEth(p.inflow),
@@ -263,14 +337,31 @@ export function generateTaxPnl(loans: StatementLoan[], meta: StatementMeta): jsP
 
   let estimated = false;
   const rows = loans
-    .flatMap((loan) =>
-      loan.events.map((e) => {
+    .flatMap((loan) => {
+      // Lender: this lender's own events once the loan has per-share data,
+      // not the whole pool's - same fallback rule as computeLoanPnl. Kept
+      // strict (no keepLifecycle) - a disposals ledger should list only the
+      // viewer's own movements. Borrower rows are unchanged.
+      //
+      // `withdrawal` is dropped here (C3): a failed push emits a `pending`
+      // ShareDistributed AND the amount is recognised as this lender's
+      // income right there. The later `withdraw()` just moves that same,
+      // already-recognised wei from contract escrow into the wallet - it is
+      // not a second acquisition. Counting both doubles the acquisitions
+      // total by exactly the pending amount. `withdrawal` stays in the
+      // Tradebook (no totals row there, so no double count) as the record of
+      // when the money actually arrived.
+      const events =
+        meta.role === 'lender'
+          ? viewerLedgerEvents(loan.events, meta.walletAddress).filter((e) => e.kind !== 'withdrawal')
+          : loan.events;
+      return events.map((e) => {
         const p = meta.priceFor(e);
         if (p.estimated) estimated = true;
         // Direction is role-relative: what left vs. entered this user's control.
         const inbound =
           meta.role === 'lender'
-            ? e.kind !== 'funded'
+            ? !OUTBOUND_KINDS.lender.includes(e.kind)
             : e.kind === 'funded' || e.kind === 'liquidated';
         return {
           ts: e.timestamp ?? 0,
@@ -278,15 +369,15 @@ export function generateTaxPnl(loans: StatementLoan[], meta: StatementMeta): jsP
             dt(e.timestamp),
             `#${loan.loanId}`,
             inbound ? 'Acquisition' : 'Disposal',
-            EVENT_LABEL[e.kind],
+            eventLabel(e),
             fmtEth(e.amount),
             p.usd ? `${p.usd.toFixed(2)}${p.estimated ? ' (est.)' : ''}` : '—',
             p.usd ? fmtUsd(ETH(e.amount) * p.usd) : '—',
             e.txHash.slice(0, 20) + '…',
           ],
         };
-      }),
-    )
+      });
+    })
     .sort((a, b) => a.ts - b.ts)
     .map((r) => r.row);
 

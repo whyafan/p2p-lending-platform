@@ -17,6 +17,10 @@ import { sepolia } from 'viem/chains';
 
 export type LoanEventKind =
   | 'funded'
+  | 'contribution'
+  | 'share-distributed'
+  | 'withdrawal'
+  | 'reclaimed'
   | 'partial-repayment'
   | 'repaid'
   | 'liquidated'
@@ -33,12 +37,25 @@ export type LoanEvent = {
   amount: bigint;
   /** Liquidations only: what went back to the borrower. */
   refunded?: bigint;
-  /** Who acted (lender for funded/liquidated, borrower for repayments). */
+  /** Who acted (lender for liquidated, borrower for repayments). `funded` has
+   *  no single actor - the pool funded it, not one lender. */
   actor?: string;
+  /** ShareDistributed only: true when the push failed and the share is pending withdrawal. */
+  pending?: boolean;
 };
 
 const LOAN_EVENT_ABI = [
-  parseAbiItem('event LoanFunded(uint256 indexed loanId, address indexed lender, uint256 amount)'),
+  parseAbiItem(
+    'event Contribution(uint256 indexed loanId, address indexed contributor, uint256 amount, uint256 totalContributed)',
+  ),
+  parseAbiItem('event LoanFunded(uint256 indexed loanId, uint256 totalContributed)'),
+  parseAbiItem(
+    'event ShareDistributed(uint256 indexed loanId, address indexed lender, uint256 amount, bool pending)',
+  ),
+  parseAbiItem('event Withdrawal(uint256 indexed loanId, address indexed lender, uint256 amount)'),
+  parseAbiItem(
+    'event ContributionReclaimed(uint256 indexed loanId, address indexed contributor, uint256 amount)',
+  ),
   parseAbiItem(
     'event PartialRepayment(uint256 indexed loanId, address indexed payer, uint256 amountApplied, uint256 totalRepaidSoFar, uint256 remainingOwed)',
   ),
@@ -170,8 +187,42 @@ export async function fetchLoanEvents(
       const a = decoded.args as Record<string, unknown>;
 
       switch (decoded.eventName) {
+        case 'Contribution':
+          events.push({
+            ...base,
+            kind: 'contribution',
+            amount: a.amount as bigint,
+            actor: a.contributor as string,
+          });
+          break;
         case 'LoanFunded':
-          events.push({ ...base, kind: 'funded', amount: a.amount as bigint, actor: a.lender as string });
+          // No single lender anymore - the pool funded the loan.
+          events.push({ ...base, kind: 'funded', amount: a.totalContributed as bigint });
+          break;
+        case 'ShareDistributed':
+          events.push({
+            ...base,
+            kind: 'share-distributed',
+            amount: a.amount as bigint,
+            actor: a.lender as string,
+            pending: a.pending as boolean,
+          });
+          break;
+        case 'Withdrawal':
+          events.push({
+            ...base,
+            kind: 'withdrawal',
+            amount: a.amount as bigint,
+            actor: a.lender as string,
+          });
+          break;
+        case 'ContributionReclaimed':
+          events.push({
+            ...base,
+            kind: 'reclaimed',
+            amount: a.amount as bigint,
+            actor: a.contributor as string,
+          });
           break;
         case 'PartialRepayment':
           events.push({
@@ -249,6 +300,10 @@ export function groupEventsByLoan(events: LoanEvent[]): Map<string, LoanEvent[]>
 
 export const EVENT_LABEL: Record<LoanEventKind, string> = {
   funded: 'Loan funded',
+  contribution: 'Contribution',
+  'share-distributed': 'Share paid out',
+  withdrawal: 'Pending share withdrawn',
+  reclaimed: 'Contribution reclaimed',
   'partial-repayment': 'Partial repayment',
   repaid: 'Repaid in full',
   liquidated: 'Liquidated',

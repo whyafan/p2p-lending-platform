@@ -32,7 +32,7 @@ const ROLE_OPTIONS = [
     value: 'lender',
     label: 'Lend',
     icon: '↑',
-    desc: 'Fund loan requests and earn interest on-chain',
+    desc: 'Contribute to loan requests and earn interest on-chain',
     color: 'hover:border-blue-500/50 hover:bg-blue-500/5',
     activeColor: 'border-blue-500/50 bg-blue-500/5',
     textColor: 'text-blue-400',

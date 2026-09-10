@@ -1,0 +1,25 @@
+# Render blueprint for the NexusFi credit-scoring backend (free tier).
+# Manual steps after pushing this file:
+#   1. Render dashboard -> New -> Blueprint -> pick this repo/branch.
+#   2. Paste ALCHEMY_API_KEY when prompted (sync: false keeps it out of git).
+#   3. Set CREDIT_BACKEND_URL=https://<service>.onrender.com on all four Vercel deployments.
+# Free-tier caveat: the service sleeps after 15 min idle and takes ~50s to wake;
+# the frontend fires a warm-up ping and degrades to the rule-based scorer meanwhile.
+services:
+  - type: web
+    name: nexusfi-credit-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: ALCHEMY_API_KEY
+        sync: false
+      # chain_fetcher.py's baked-in default factory address predates the
+      # 2026-08-21 pooling redeploy; pin the current one explicitly.
+      - key: NEXUSFI_FACTORY_SEPOLIA
+        value: "0x0e3ea8f226434feadb267d05c9c4ef8f951c7d00"

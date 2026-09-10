@@ -103,7 +103,7 @@ export default function DemoPage() {
     [termsResults],
   );
 
-  const buildReads = (fn: 'status' | 'currentLtvBps' | 'isLiquidatable' | 'lender' | 'repaymentDueAt') =>
+  const buildReads = (fn: 'status' | 'currentLtvBps' | 'isLiquidatable' | 'repaymentDueAt') =>
     loanAddresses.map((addr) => ({ address: addr, abi: LOAN_ABI, functionName: fn, chainId }));
 
   const { data: statusRes, refetch: refetchStatus } = useReadContracts({
@@ -118,15 +118,31 @@ export default function DemoPage() {
     contracts: useMemo(() => buildReads('isLiquidatable'), [loanAddresses]),
     query: { enabled: loanAddresses.length > 0, refetchInterval: 15_000 },
   });
-  const { data: lenderRes, refetch: refetchLender } = useReadContracts({
-    contracts: useMemo(() => buildReads('lender'), [loanAddresses]),
-    query: { enabled: loanAddresses.length > 0, refetchInterval: 15_000 },
+  // contributions(address) replaces the old zero-arg lender() - it takes the
+  // connected wallet's address as an argument, so this round is built
+  // separately and disabled entirely (empty contracts array) rather than
+  // firing with a bad argument when no wallet is connected.
+  const { data: contributionRes, refetch: refetchContribution } = useReadContracts({
+    contracts: useMemo(
+      () =>
+        address
+          ? loanAddresses.map((addr) => ({
+              address: addr,
+              abi: LOAN_ABI,
+              functionName: 'contributions' as const,
+              args: [address] as const,
+              chainId,
+            }))
+          : [],
+      [loanAddresses, address, chainId],
+    ),
+    query: { enabled: loanAddresses.length > 0 && Boolean(address), refetchInterval: 15_000 },
   });
 
   async function refetchAll() {
     await Promise.all([
       refetchPrice(), refetchIds(), refetchTerms(),
-      refetchStatus(), refetchLtv(), refetchLiq(), refetchLender(),
+      refetchStatus(), refetchLtv(), refetchLiq(), refetchContribution(),
     ]);
   }
 
@@ -148,10 +164,10 @@ export default function DemoPage() {
         statusVal: idx >= 0 && statusRes?.[idx]?.status === 'success' ? Number(statusRes[idx].result) : undefined,
         ltvBps: pick<bigint | undefined>(ltvRes, undefined),
         liquidatable: pick<boolean | undefined>(liqRes, undefined),
-        lenderAddr: pick<`0x${string}` | undefined>(lenderRes, undefined),
+        myContribution: pick<bigint | undefined>(contributionRes, undefined),
       };
     });
-  }, [loanIds, termsResults, loanAddresses, statusRes, ltvRes, liqRes, lenderRes]);
+  }, [loanIds, termsResults, loanAddresses, statusRes, ltvRes, liqRes, contributionRes]);
 
   // One wrapper around every write on this page, so the chain switch, the busy label
   // and the error truncation are identical whichever control was clicked. `label`
@@ -231,7 +247,7 @@ export default function DemoPage() {
         ) : !isConnected ? (
           <div className="rounded-2xl border border-slate-800 bg-[#111827] p-8 text-center">
             <p className="text-sm font-bold text-slate-400">Connect a wallet to use the demo controls.</p>
-            <p className="text-xs text-slate-600 mt-1">Time-skips must be sent by that loan&apos;s borrower or lender.</p>
+            <p className="text-xs text-slate-600 mt-1">Time-skips must be sent by that loan&apos;s borrower or a contributor.</p>
           </div>
         ) : (
           <>
@@ -303,23 +319,26 @@ export default function DemoPage() {
                 <h2 className="text-sm font-black uppercase tracking-widest">Skip time</h2>
               </div>
               <p className="text-[11px] text-slate-600 mb-4">
-                Rewinds a loan&apos;s own clock (block time can&apos;t be moved on a live chain). Only that loan&apos;s
-                borrower or lender can do it. Interest accrues over the skipped period, exactly as if the time had
-                really passed.
+                Rewinds a loan&apos;s own clock (block time can&apos;t be moved on a live chain). While a loan is still
+                collecting contributions, only its borrower can do this; once funded, the borrower or any contributor
+                can. Interest accrues over the skipped period, exactly as if the time had really passed.
               </p>
 
               {loans.length === 0 ? (
                 <p className="text-xs text-slate-600">No loans yet. Create one from the dashboard first.</p>
               ) : (
                 <div className="space-y-2">
-                  {loans.map(({ id, terms, statusVal, ltvBps, liquidatable, lenderAddr }) => {
+                  {loans.map(({ id, terms, statusVal, ltvBps, liquidatable, myContribution }) => {
                     if (!terms) return null;
                     const me = address?.toLowerCase();
-                    // Mirrors the contract's own participant check so the button is
-                    // disabled rather than offered and then reverted. The contract
-                    // remains the enforcement point; this is only the affordance.
-                    const isParticipant =
-                      me === terms.borrower.toLowerCase() || me === lenderAddr?.toLowerCase();
+                    const isBorrower = me === terms.borrower.toLowerCase();
+                    const isContributor = myContribution !== undefined && myContribution > 0n;
+                    // fastForward's on-chain gate is status-dependent (Loan.sol): while
+                    // Requested, only the borrower may call it, so a contributor must not
+                    // be shown an enabled Skip control at that stage even though they will
+                    // be a valid participant once the loan is Funded.
+                    const isParticipant = statusVal === 0 ? isBorrower : isBorrower || isContributor;
+                    const contributorLockedOutWhileRequested = statusVal === 0 && isContributor && !isBorrower;
                     const closed = statusVal !== undefined && statusVal >= 2;
                     const ltv = ltvBps !== undefined && Number(ltvBps) > 0 ? Number(ltvBps) / 100 : null;
                     const durSecs = Number(terms.durationDays) * DAY;
@@ -343,10 +362,12 @@ export default function DemoPage() {
                         </div>
 
                         {closed ? (
-                          <p className="text-[10px] text-slate-700">Loan is closed — nothing to skip.</p>
+                          <p className="text-[10px] text-slate-700">Loan is closed - nothing to skip.</p>
                         ) : !isParticipant ? (
                           <p className="text-[10px] text-slate-700">
-                            You are not the borrower or lender on this loan, so you can&apos;t skip its clock.
+                            {contributorLockedOutWhileRequested
+                              ? "This loan is still collecting contributions. Only the borrower can skip its clock until it's funded."
+                              : "You are not the borrower or a contributor on this loan, so you can't skip its clock."}
                           </p>
                         ) : (
                           <div className="flex flex-wrap gap-2">

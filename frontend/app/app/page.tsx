@@ -218,8 +218,11 @@ export default function AppPage() {
   const { data: priceData } = useTokenPrices();
 
   const ethPrice = priceData?.prices?.['ETH'] ?? priceData?.prices?.['ethereum'] ?? 0;
+  // Keyed by symbol ('ETH'), not by coingecko id: /api/prices builds marketData
+  // from TICKER_COINS' symbol keys, so 'ethereum' here silently never matched
+  // and the 24h change never rendered.
   const ethChange24h = (priceData?.marketData as Record<string, { usd: number; change24h: number }> | undefined)
-    ?.['ethereum']?.change24h ?? null;
+    ?.['ETH']?.change24h ?? null;
 
   const userRole = compliance.data?.userRole ?? 'borrower';
   const canLend = compliance.data?.canLend ?? false;
@@ -434,6 +437,14 @@ export default function AppPage() {
             Change role
           </Link>
 
+          <Link
+            href="/directory"
+            className="text-xs font-bold text-slate-600 hover:text-white transition-colors"
+            title="Search for another verified user"
+          >
+            Find a user
+          </Link>
+
           {/* Live market price — labelled and ticking, not a stale snapshot */}
           <EthPriceTicker price={ethPrice} change24h={ethChange24h} updatedAt={priceData?.updatedAt} />
         </div>
@@ -559,7 +570,7 @@ export default function AppPage() {
                       { Icon: GraduationCap, label: 'Get your grade',              desc: 'We check 8 things about you (wallet age, history) and give you a grade: A, B, or C.' },
                       { Icon: Banknote,      label: 'Choose how much you want',    desc: 'Pick an amount and how long you need it. We show the exact interest upfront, no surprises.' },
                       { Icon: ShieldCheck,   label: 'Put up a security deposit',   desc: 'Like renting a flat: lock some ETH as security. You get it all back when you repay.' },
-                      { Icon: Handshake,     label: 'A lender sends you the money', desc: 'Someone on the other side sees your request and sends you the funds directly.' },
+                      { Icon: Handshake,     label: 'Lenders fund your request',   desc: 'One or more lenders each put in part of the amount. Once the pool fills, the ETH is sent to you.' },
                       { Icon: CheckCircle2,  label: 'Repay & get your deposit back', desc: 'Pay back the loan and interest on time, and your security deposit is returned instantly.' },
                     ].map(({ Icon, label, desc }) => (
                       <li key={label} className="flex items-start gap-3">

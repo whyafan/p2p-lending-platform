@@ -1,14 +1,15 @@
 'use client';
 
 import { useState, useMemo, useEffect } from 'react';
-import { useWriteContract, useWaitForTransactionReceipt, useAccount, useBalance, useSwitchChain, useReadContract } from 'wagmi';
-import { decodeEventLog } from 'viem';
+import { useWriteContract, useWaitForTransactionReceipt, useAccount, useBalance, useSwitchChain, useReadContract, useSignTypedData } from 'wagmi';
 import { parseEther } from 'viem';
+import { decodeLoanCreatedFromReceipt } from '../lib/decode-loan-created.ts';
 import { sepolia, hardhat } from 'wagmi/chains';
 import { BORROWER_PERSONAS, type BorrowerPersona } from '../lib/borrower-personas';
 import { scoreFeatureVector, type RiskExplanation, type FeatureVector } from '../lib/risk-explainer';
 import type { OffChainMetadata } from '../lib/borrower-personas';
 import { RISK_TIER_CONFIG, BASE_APR, calculateProtocolLoanTerms, type LoanTermSheet } from '../lib/loan-terms';
+import { TERM_SHEET_TYPES, termSheetDomain, serializeMessage, type TermSheetMessage } from '../lib/termsheet-typed-data';
 import { formatUsd, formatPercent } from '../lib/format';
 import { RiskExplanationPanel } from './RiskExplanationPanel';
 import { storeLoanTx, MAX_OPEN_REQUESTS } from './BorrowerLoansSection';
@@ -32,8 +33,9 @@ type EvalMode = 'persona' | 'wallet';
 // Max collateral we'll actually send on-chain for any demo tx (keeps Sepolia cost near-zero)
 const DEMO_MAX_COLLATERAL_ETH = 0.005;
 
-const LOAN_STATUS_ABI = [
+const LOAN_PROGRESS_ABI = [
   { name: 'status', type: 'function', inputs: [], outputs: [{ name: '', type: 'uint8' }], stateMutability: 'view' },
+  { name: 'totalContributed', type: 'function', inputs: [], outputs: [{ name: '', type: 'uint256' }], stateMutability: 'view' },
 ] as const;
 
 const LOAN_FACTORY_ABI = [
@@ -136,7 +138,13 @@ type BackendScoreResult = {
   }>;
   warnings: string[];
   fallback_used: boolean;
+  model_version?: string | null;
 };
+
+// Knock on the scoring backend so Render starts waking while the user fills the form.
+function warmUpCreditBackend() {
+  void fetch('/api/credit/score', { method: 'GET' }).catch(() => {});
+}
 
 function ScoreGauge({ score, tier }: { score: number; tier: string }) {
   // Maps the model's [-1, +1] onto a 0-100% bar width. The two tick marks below sit at
@@ -408,6 +416,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   const [isScoring, setIsScoring] = useState(false);
   const [backendResult, setBackendResult] = useState<BackendScoreResult | null>(null);
   const [scoringWarnings, setScoringWarnings] = useState<string[]>([]);
+  const [backendUnavailable, setBackendUnavailable] = useState(false);
 
   // Real wallet ETH balance (Sepolia)
   const realWalletEth = walletBalance ? parseFloat(walletBalance.formatted) : null;
@@ -461,6 +470,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   }, [riskExpl, termSheet, realWalletEth, ethPrice]);
 
   const { writeContractAsync, isPending: isTxPending } = useWriteContract();
+  const { signTypedDataAsync } = useSignTypedData();
+  const [termSheetPin, setTermSheetPin] = useState<{ cid: string; hash: string } | null>(null);
 
   const { data: txReceipt, isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
     hash: submittedHash,
@@ -484,21 +495,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   useEffect(() => {
     if (!isConfirmed || !txReceipt || createdLoanContract) return;
 
-    for (const log of txReceipt.logs) {
-      try {
-        const decoded = decodeEventLog({
-          abi: LOAN_FACTORY_ABI,
-          data: log.data,
-          topics: log.topics,
-        });
-        if (decoded.eventName === 'LoanCreated') {
-          setCreatedLoanContract((decoded.args as { loanContract: `0x${string}` }).loanContract);
-          return;
-        }
-      } catch {
-        // Not a LoanCreated log (the vault emits its own) — keep looking.
-      }
-    }
+    const decoded = decodeLoanCreatedFromReceipt(txReceipt.logs);
+    if (decoded) setCreatedLoanContract(decoded.loanContract);
   }, [isConfirmed, txReceipt, createdLoanContract]);
 
   // Persist the risk explanation once we know which loan it belongs to.
@@ -520,17 +518,31 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
         contributions: riskExpl.contributions,
         source: evalMode === 'persona' ? 'persona' : 'wallet',
         personaId: selectedPersona?.id ?? null,
+        modelVersion: evalMode === 'wallet' ? (backendResult?.model_version ?? null) : null,
+        termSheetCid: evalMode === 'wallet' ? (termSheetPin?.cid ?? null) : null,
+        termSheetHash: evalMode === 'wallet' ? (termSheetPin?.hash ?? null) : null,
       }),
     }).catch((err) => console.error('[risk-persist]', err));
-  }, [createdLoanContract, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona]);
+  }, [createdLoanContract, riskExpl, riskSaved, chainId, address, evalMode, selectedPersona, backendResult, termSheetPin]);
 
   // "What happens next" used to be a static list with `done` hardcoded, so it
   // never moved past step 1 no matter what happened on-chain. Follow the real
   // loan status instead.
   const { data: createdLoanStatus } = useReadContract({
     address: createdLoanContract,
-    abi: LOAN_STATUS_ABI,
+    abi: LOAN_PROGRESS_ABI,
     functionName: 'status',
+    chainId,
+    query: { enabled: Boolean(createdLoanContract), refetchInterval: 5_000 },
+  });
+
+  // Pooled funding progress for the "what happens next" tracker - several
+  // lenders can each fund part of the request, so a live percentage matters
+  // while it's still Requested instead of a single all-or-nothing signal.
+  const { data: createdLoanTotalContributed } = useReadContract({
+    address: createdLoanContract,
+    abi: LOAN_PROGRESS_ABI,
+    functionName: 'totalContributed',
     chainId,
     query: { enabled: Boolean(createdLoanContract), refetchInterval: 5_000 },
   });
@@ -598,6 +610,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     if (!address) return;
     setIsScoring(true);
     setScoringWarnings([]);
+    setBackendUnavailable(false);
     try {
       const res = await fetch('/api/credit/score', {
         method: 'POST',
@@ -622,7 +635,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
       // the local one having no access to the borrower's real chain history, so quietly
       // substituting it would hand out a tier the UI claims came from mainnet analysis.
       if (data.fallback) {
-        setScoringWarnings(['Credit scoring backend unavailable. Start the backend server and try again.']);
+        setBackendUnavailable(true);
+        setScoringWarnings(['Real-wallet scoring is temporarily unavailable. The service may be waking up (it sleeps when idle) - try again in about a minute, or switch to demo mode below.']);
       } else if (res.ok) {
         const result = data as unknown as BackendScoreResult;
         setBackendResult(result);
@@ -645,15 +659,56 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
   // Switch between persona and wallet mode (can be called from any step)
   function switchMode() {
     const nextMode: EvalMode = evalMode === 'persona' ? 'wallet' : 'persona';
+    if (nextMode === 'wallet') warmUpCreditBackend();
     setEvalMode(nextMode);
     setSelectedPersona(null);
     setRiskExpl(null);
+    setScoringWarnings([]);
+    setBackendUnavailable(false);
     onTierChange?.(null, null);
     onPersonaChange?.(null);
     setWizardStep(nextMode === 'wallet' && !address ? 0 : 1);
   }
 
+  // Best-effort: sign the term sheet and anchor it on IPFS. Wallet mode only.
+  // A declined signature or failed pin never blocks the loan - we just proceed unanchored.
+  async function signAndPinTermSheet(principalWei: bigint, collateralWei: bigint) {
+    if (evalMode !== 'wallet' || !termSheet || !address) return;
+    try {
+      const message: TermSheetMessage = {
+        borrower: address,
+        principalWei,
+        collateralWei,
+        tenorDays: BigInt(tenorDays),
+        interestBps: BigInt(termSheet.interestBps),
+        maxLtvBps: BigInt(termSheet.maxLtvBps),
+        liquidationBufferBps: BigInt(termSheet.liquidationBufferBps),
+        issuedAt: BigInt(Math.floor(Date.now() / 1000)),
+      };
+      const signature = await signTypedDataAsync({
+        domain: termSheetDomain(chainId),
+        types: TERM_SHEET_TYPES,
+        primaryType: 'LoanTermSheet',
+        message,
+      });
+      const res = await fetch('/api/termsheet/pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chainId, message: serializeMessage(message), signature, signer: address }),
+      });
+      if (res.ok) {
+        const { cid, hash } = (await res.json()) as { cid: string; hash: string };
+        setTermSheetPin({ cid, hash });
+      } else {
+        console.warn('[termsheet] pin failed:', res.status);
+      }
+    } catch (err) {
+      console.warn('[termsheet] signing declined or failed:', err);
+    }
+  }
+
   async function submitLoan() {
+    setTermSheetPin(null);
     if (!termSheet || !address || !demoTxAmounts) return;
     setTxError(null);
 
@@ -671,6 +726,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
       // on mainnet would otherwise be asked to sign a transaction against a factory
       // address that means nothing there.
       await switchChainAsync({ chainId });
+      await signAndPinTermSheet(principalWei, collateralWei);
       const hash = await writeContractAsync({
         address: factoryAddress as `0x${string}`,
         abi: LOAN_FACTORY_ABI,
@@ -705,11 +761,13 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
     setSubmittedHash(undefined);
     setRiskSaved(false);
     setCreatedLoanContract(undefined);
+    setTermSheetPin(null);
     onTierChange?.(null, null);
     onPersonaChange?.(null);
   }
 
   function startWalletMode() {
+    warmUpCreditBackend();
     setEvalMode('wallet');
     setWizardStep(1);
   }
@@ -919,10 +977,19 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
             />
 
             {scoringWarnings.length > 0 && (
-              <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 space-y-1">
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 space-y-2">
                 {scoringWarnings.map((w, i) => (
                   <p key={i} className="text-[11px] text-amber-400">{w}</p>
                 ))}
+                {backendUnavailable && (
+                  <button
+                    type="button"
+                    onClick={switchMode}
+                    className="text-[11px] font-bold text-purple-400 hover:text-purple-300 transition-colors underline underline-offset-2"
+                  >
+                    Use demo mode instead →
+                  </button>
+                )}
               </div>
             )}
 
@@ -936,6 +1003,8 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                   <span className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
                   Analyzing Ethereum Mainnet + Sepolia…
                 </>
+              ) : backendUnavailable ? (
+                'Retry Scoring'
               ) : (
                 'Score My Wallet →'
               )}
@@ -1185,7 +1254,7 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                       Limit reached: {MAX_OPEN_REQUESTS} pending requests maximum
                     </p>
                     <p className="text-[11px] text-amber-300/70 mt-0.5">
-                      You have {pendingLoanCount} open loan requests. A lender must fund (or one must expire) before you can submit another.
+                      You have {pendingLoanCount} open loan requests. One must be fully funded by lenders (or expire) before you can submit another.
                     </p>
                   </div>
                 )}
@@ -1242,11 +1311,30 @@ export function LoanRequestPanel({ ethPrice, networkMode = 'testnet', onTierChan
                         const funded = st >= 1 && st !== 3;
                         const closed = st === 2;
                         const liquidated = st === 4;
+                        // Same bigint-first percentage LenderDashboard and
+                        // BorrowerLoansSection use, computed against the exact wei
+                        // amount sent on-chain in submitLoan() so it lines up with
+                        // the contract's own principalAmount.
+                        const principalWei = parseEther(demoTxAmounts.actualPrincipal.toFixed(18));
+                        const fundedWei = createdLoanTotalContributed ?? BigInt(0);
+                        const fundedPct =
+                          principalWei > BigInt(0)
+                            ? Number((fundedWei * BigInt(10_000)) / principalWei) / 100
+                            : 0;
                         return [
                           { Icon: Check, done: true, label: 'Loan contract deployed', desc: `CollateralVault holds your ${demoTxAmounts.actualCollateral.toFixed(6)} ETH` },
-                          { Icon: funded ? Check : Clock, done: funded, label: funded ? 'Lender funded your request' : 'Awaiting a lender (up to 7 days)', desc: `Lender sends ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH to fund your request` },
+                          {
+                            Icon: funded ? Check : Clock,
+                            done: funded,
+                            label: funded ? 'Lenders funded your request' : 'Awaiting lenders (up to 7 days)',
+                            desc: funded
+                              ? `Lenders sent ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH to fund your request`
+                              : st === 3
+                              ? 'Request was cancelled before it was funded'
+                              : `${fundedPct.toFixed(0)}% funded - lenders can each fund part of the ${demoTxAmounts.actualPrincipal.toFixed(6)} ETH`,
+                          },
                           { Icon: Check, done: funded, label: 'You receive the principal', desc: `${demoTxAmounts.actualPrincipal.toFixed(6)} ETH sent to your wallet` },
-                          { Icon: ShieldCheck, done: closed, label: 'Repay to unlock collateral', desc: liquidated ? 'Loan was liquidated — collateral went to the lender' : `Repay within ${tenorDays} days to get your ETH back` },
+                          { Icon: ShieldCheck, done: closed, label: 'Repay to unlock collateral', desc: liquidated ? 'Loan was liquidated - collateral was split among your lenders' : `Repay within ${tenorDays} days to get your ETH back` },
                           { Icon: Check, done: closed, label: 'Collateral returned', desc: `Your ${demoTxAmounts.actualCollateral.toFixed(6)} ETH released from vault` },
                         ];
                       })().map(({ Icon, done, label, desc }) => (

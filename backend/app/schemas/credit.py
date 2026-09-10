@@ -79,3 +79,4 @@ class ScoreResponse(BaseModel):
     contributions: list[FeatureContribution]
     warnings: list[str]
     fallback_used: bool = False
+    model_version: str | None = None   # content-hash version of the scoring model; None = rule-based fallback or unstamped/unreadable model meta

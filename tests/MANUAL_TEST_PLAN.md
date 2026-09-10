@@ -199,6 +199,104 @@ with the balance itself or the contract on a block explorer.
 
 ---
 
+## Track F - Peer discovery (do after A)
+
+Needs two accounts that can already see each other in Track A/C, at least one with an open loan
+request and one with a funded position so both sections of the profile page have something to show.
+
+- [ ] **F1 Search by name** - From account 1, go to Find a user (or `/directory`), search the first
+      few characters of account 2's display name. Verify account 2 appears, account 1 does not
+      appear in its own results, and typing a single character shows no results and fires no request
+- [ ] **F2 Search by wallet** - Search the last 6 characters of account 2's wallet address instead.
+      Verify the same result appears
+- [ ] **F3 View profile** - Click into account 2's result. Verify display name, KYC badge, role
+      badge, and full wallet address (with working copy + Etherscan link) all match what account 2
+      sees on their own `/settings` page
+- [ ] **F4 Open requests visible** - If account 2 has an open (unfunded) loan request, verify it
+      shows under "Open loan requests" on their profile, with no fund/repay/liquidate button anywhere
+      on the page
+- [ ] **F5 Active positions visible** - If account 2 has funded someone else's loan, verify it shows
+      under "Active positions" the same way
+- [ ] **F6 Unverified/unknown wallet** - Visit `/directory/0x0000000000000000000000000000000000dead`
+      directly. Verify "User not found or not verified", not a crash or blank page
+- [ ] **F7 Signed out** - Log out, then visit `/directory` and `/directory/<any wallet>` directly.
+      Verify both redirect to `/`
+
+---
+
+## Track G - Multi-lender pooling (do after A; 2 lender wallets minimum, 3 if available)
+
+Uses the redeployed pooled Loan.sol. Several lenders can now fund one request in pieces, the
+borrower is paid only once the pool reaches the full principal, and every payout after that
+splits pro-rata by contribution. Keep every contribution at or above 1% of principal except
+where G3 deliberately tests that edge, and use a small principal (>=0.01 ETH, per BUG-03) so
+interest doesn't round to zero.
+
+- [ ] **G1 Partial fill** - Borrower creates a small loan. Lender 1 contributes roughly 60% of
+      the principal. Verify: the funding progress bar reads about 60% on both the lender's Open
+      Requests card and the borrower's own Loans section ("NN% funded - waiting for lenders"),
+      status stays `Requested` on both dashboards, and the borrower's wallet balance has NOT
+      increased
+- [ ] **G2 Fill completes the pool, with an over-contribution refund** - Lender 2 sends
+      noticeably more than the remaining gap. Verify by WALLET BALANCE, not the input box:
+      Lender 2 is debited only the remaining gap, the excess comes back in the same transaction,
+      the loan flips to `Funded` on every dashboard, and the borrower's wallet balance rises by
+      exactly the principal
+- [ ] **G3 Minimum-contribution edge case** - On a fresh small loan, have Lender 1 contribute
+      until less than 1% of the principal remains (watch the live funding readout - e.g. on a
+      0.01 ETH loan, stop just above 99% funded). Verify the amber notice appears explaining that
+      the Remaining button offers more than what's actually left because the contract enforces a
+      minimum, that the difference comes back automatically, and that completing the contribution
+      succeeds with the difference refunded and the loan reaching `Funded`
+- [ ] **G4 Pro-rata repayment** - On the loan from G1/G2 (roughly 60/40 between two lenders),
+      Borrower repays in full. Verify by WALLET BALANCES, not the UI: Lender 1's balance rises by
+      about 60% of the repayment and Lender 2's by about 40%, and the two amounts sum exactly to
+      what the borrower paid
+- [ ] **G5 Pro-rata liquidation, triggered by the smaller contributor** - Fund a fresh pooled
+      loan with Lender 1 taking the larger share and Lender 2 the smaller. Skip time via `/demo`
+      past the deadline and grace period, then have Lender 2 (not the largest or first
+      contributor) click Liquidate. Verify the transaction succeeds from Lender 2's wallet, both
+      lenders' wallets rise by their pro-rata share of the seizure, and the borrower's wallet
+      rises by the refunded surplus
+- [ ] **G6 Per-share settlement receipt** - On the now-closed pooled loan, each lender opens
+      their own settlement receipt (My Positions > Completed). Verify each receipt shows only
+      that lender's own lent/received/interest figures, not the pool's totals, and that the
+      per-leg audit trail below lists only their own contribution/share/withdrawal rows (plus
+      loan-level context), not another lender's payouts appearing as unlabeled money in their
+      column
+- [ ] **G7 Per-share statements** - Each lender downloads a Profit & Loss and a Tax P&L from
+      Statements (role: Lender) and checks the figures against their own wallet deltas from
+      G4/G5. Then, using a loan whose funding and repayment/settlement happened on different
+      calendar days (an earlier test session works, or fund now and close it in a later
+      session), set the reporting period to a custom range that starts AFTER the funding date but
+      still covers the settlement date. Verify the Tax P&L still shows the lender's real
+      contribution as the cost basis, not zero, and not the whole repayment reported as pure
+      profit
+- [ ] **G8 Reclaim from a dead pool** - Borrower creates a request, Lender 1 contributes a
+      partial amount, Borrower cancels before it fills. Verify Lender 1 sees a Reclaim card in My
+      Positions ("This request was cancelled by the borrower... your X ETH contribution is
+      waiting in the contract") and that Reclaim returns exactly their contribution. Separately,
+      on another partially-filled request, let it expire instead of cancelling (the borrower can
+      repeatedly skip `+1 day` via `/demo` until past the 7-day funding window) and verify the
+      same Reclaim flow appears once it has expired
+- [ ] **G9 Claim path (undelivered share)** - `pendingWithdrawals` only fills when a push
+      transfer fails, which needs a recipient that reverts or exceeds the 50,000 gas forwarded.
+      An ordinary MetaMask (EOA) wallet always accepts a plain ETH transfer well under that
+      limit, so this cannot be triggered with the wallets used for this checklist. Do not attempt
+      it manually - confirm instead that after G4/G5's payouts, no lender sees the amber "could
+      not be delivered to your wallet" banner in My Positions (both push transfers succeeded, as
+      expected for EOAs). If a rejecting smart-contract wallet is ever available as a
+      contributor, that is the real way to exercise Claim - the banner and the Claim button
+      calling `withdraw()` already exist for it
+- [ ] **G10 Demo time-skip gate** - While a loan is still `Requested` with at least one
+      non-borrower contributor, have that contributor open `/demo`. Verify: no skip-time buttons
+      are shown for that loan, replaced by "This loan is still collecting contributions. Only the
+      borrower can skip its clock until it's funded." (not a generic "you are not involved"
+      message), while the borrower still sees and can use the skip controls. Once the loan is
+      `Funded`, verify the same contributor now sees and can use the skip controls too
+
+---
+
 ## Findings log
 
 | Date | Track/step | What happened | Expected | Severity |
@@ -224,3 +322,6 @@ with the balance itself or the contract on a block explorer.
 - **BUG-14** — `liquidationBufferBps` missing from some lender views (cosmetic).
 - **Partial liquidation not supported** — liquidation always seizes the full collateral, never just enough to cover the debt (CollateralVault is one-shot/all-or-nothing).
 - **Loan amounts are USD-framed in the UI but ETH-settled on-chain** — a price move changes the lender's USD exposure and can trigger liquidation, but never restates what the borrower owes in ETH. Deliberate; see PLAN.md.
+- **Contract redeploy (2026-08-21)** - addresses changed for the pooling upgrade; loans created against the previous factory no longer appear in the new marketplace. Expected after any redeploy (see Gotchas above), not a new bug.
+- **Single global funding-tx state (LenderDashboard)** - fundingLoanId/fundingHash/isFundPending is one shared value, not per-card; starting a contribution on one loan then clicking Contribute on another before the first wallet prompt resolves can make the first card's confirmation banner disappear. Pre-existing pattern (same as the old FundButton), not introduced by pooling.
+- **My Positions follows only the active wallet account** - contributions() is queried for the single connected address, not every account across a multi-account wallet connection; a contribution made from a different account than the one currently active won't show until you switch back to it.

@@ -17,10 +17,13 @@
  */
 
 import { useState } from 'react';
+import { verifyTypedData } from 'viem';
 import type { RiskTier } from '../lib/loan-terms';
 import type { FeatureContribution } from '../lib/risk-explainer';
 import { RISK_TIER_CONFIG, BASE_APR } from '../lib/loan-terms';
 import { formatPercent, formatUsd } from '../lib/format';
+import { termSheetHash } from '../lib/termsheet-canonical';
+import { TERM_SHEET_TYPES, parseMessage, PINATA_GATEWAY } from '../lib/termsheet-typed-data';
 import { ShieldCheck, ChevronDown, AlertTriangle } from 'lucide-react';
 
 type Props = {
@@ -31,8 +34,17 @@ type Props = {
   durationDays: number;
   /** Live LTV from the contract (0–1). null when the oracle is unavailable. */
   currentLtv: number | null;
+  /** Whole-loan figures - this pool's total collateral and principal, not any one lender's. */
   collateralUsd: number | null;
   principalUsd: number | null;
+  /**
+   * This viewer's fraction of the loan's principal (0-1), when they have a
+   * position. 0 or omitted means "no personal position yet" - the panel then
+   * shows the loan's whole-pool figures labelled as the loan's, not "yours".
+   * Multi-lender pooling means principalUsd/collateralUsd above are never a
+   * single lender's own numbers.
+   */
+  myShareFrac?: number;
   /** Contract's own view — the authoritative gate. */
   isLiquidatable?: boolean;
   /** Persisted borrower assessment, when one was saved at request time. */
@@ -42,7 +54,14 @@ type Props = {
     contributions: FeatureContribution[];
     source?: string | null;
     personaId?: string | null;
+    modelVersion?: string | null;
+    termSheetCid?: string | null;
+    termSheetHash?: string | null;
   } | null;
+  /** This loan's borrower - used to confirm the term-sheet signer matches. */
+  borrower?: string | null;
+  /** Chain the loan lives on - used to confirm the pinned domain matches. */
+  chainId?: number;
 };
 
 export function LoanSafetyPanel({
@@ -54,10 +73,89 @@ export function LoanSafetyPanel({
   currentLtv,
   collateralUsd,
   principalUsd,
+  myShareFrac,
   isLiquidatable,
   assessment,
+  borrower,
+  chainId,
 }: Props) {
   const [open, setOpen] = useState(false);
+  type VerifyState = 'idle' | 'checking' | 'verified' | 'mismatch' | 'error';
+  const [verifyState, setVerifyState] = useState<VerifyState>('idle');
+  const [verifyDetail, setVerifyDetail] = useState<string | null>(null);
+
+  async function verifyTermSheet() {
+    if (!assessment?.termSheetCid || !assessment.termSheetHash) return;
+    setVerifyState('checking');
+    setVerifyDetail(null);
+    try {
+      const res = await fetch(`${PINATA_GATEWAY}${assessment.termSheetCid}`, {
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`gateway ${res.status}`);
+      const payload = (await res.json()) as Record<string, unknown>;
+
+      // 1. Content integrity: the fetched document hashes to the stored hash.
+      if (termSheetHash(payload) !== assessment.termSheetHash.toLowerCase()) {
+        setVerifyState('mismatch');
+        setVerifyDetail('The document on IPFS does not match the hash saved at loan creation.');
+        return;
+      }
+
+      try {
+        // 2. Signature: the signer really signed these terms, and is this loan's borrower.
+        const message = parseMessage(payload.message as Record<string, unknown>);
+        const signer = String(payload.signer ?? '');
+        const sigOk = await verifyTypedData({
+          address: signer as `0x${string}`,
+          domain: payload.domain as { name: string; version: string; chainId: number },
+          types: TERM_SHEET_TYPES,
+          primaryType: 'LoanTermSheet',
+          message,
+          signature: String(payload.signature ?? '') as `0x${string}`,
+        });
+        const isBorrower = !borrower || signer.toLowerCase() === borrower.toLowerCase();
+
+        // 3. Domain and standard: the pinned document really is a NexusFi term sheet
+        // for this chain, not some other signed payload that happens to hash clean.
+        const domain = payload.domain as { name?: string; version?: string; chainId?: number };
+        const domainOk =
+          payload.standard === 'NexusFi-TermSheet-v1' &&
+          domain?.name === 'NexusFi' &&
+          domain?.version === '1' &&
+          (chainId === undefined || domain?.chainId === chainId);
+
+        // 4. Terms: the signed terms are actually this loan's on-chain terms, not
+        // just any validly-signed term sheet.
+        const termsOk =
+          Number(message.interestBps) === interestBps &&
+          Number(message.maxLtvBps) === maxLtvBps &&
+          Number(message.liquidationBufferBps) === liquidationBufferBps &&
+          Number(message.tenorDays) === durationDays;
+
+        if (sigOk && isBorrower && domainOk && termsOk) {
+          setVerifyState('verified');
+        } else {
+          setVerifyState('mismatch');
+          setVerifyDetail(
+            !sigOk
+              ? 'The EIP-712 signature does not verify against the pinned terms.'
+              : !isBorrower
+                ? 'Signature is valid but the signer is not this loan\'s borrower.'
+                : !domainOk
+                  ? 'The pinned document\'s domain or standard is not a NexusFi term sheet.'
+                  : 'The pinned terms do not match this loan\'s on-chain terms.',
+          );
+        }
+      } catch {
+        setVerifyState('mismatch');
+        setVerifyDetail('The pinned document is not a structurally valid signed term sheet.');
+      }
+    } catch {
+      setVerifyState('error');
+      setVerifyDetail('Could not fetch or verify the term sheet from the IPFS gateway. Try again in a moment.');
+    }
+  }
 
   const cfg = tier ? RISK_TIER_CONFIG[tier] : null;
   const maxLtv = maxLtvBps / 10_000;
@@ -65,20 +163,30 @@ export function LoanSafetyPanel({
   const threshold = maxLtv + buffer;
   const apr = interestBps / 10_000;
 
-  // How far ETH can fall before this position becomes liquidatable. Debt is
+  // A personal position exists only once this viewer actually holds a share
+  // of the pool - otherwise the "Your protection" heading and figures below
+  // would be asserting a position that doesn't exist yet.
+  const hasPosition = (myShareFrac ?? 0) > 0;
+  const myCollateralUsd =
+    collateralUsd !== null && hasPosition ? collateralUsd * (myShareFrac as number) : null;
+  const myPrincipalUsd =
+    principalUsd !== null && hasPosition ? principalUsd * (myShareFrac as number) : null;
+
+  // How far ETH can fall before this loan becomes liquidatable. Debt is
   // frozen in USD at funding, so LTV scales inversely with price:
-  // liquidation at  currentLtv / threshold  of today's price.
+  // liquidation at  currentLtv / threshold  of today's price. Price-invariant
+  // to any one lender's share, so this stays loan-wide regardless of hasPosition.
   const dropToLiquidation =
     currentLtv !== null && currentLtv > 0 && threshold > 0
       ? Math.max(0, 1 - currentLtv / threshold)
       : null;
 
-  // What the lender recovers at the moment of liquidation, before gas.
-  // Shown because "you are protected by collateral" is meaningless without the number:
-  // at the threshold the collateral is still worth more than the debt, which is the
-  // actual reason the position is safe to fund.
+  // What the pool recovers at the moment of liquidation, before gas - loan-wide,
+  // scaled down to this viewer's share only where it's presented as personal.
   const collateralAtThreshold =
     principalUsd !== null && threshold > 0 ? principalUsd / threshold : null;
+  const myCollateralAtThreshold =
+    collateralAtThreshold !== null && hasPosition ? collateralAtThreshold * (myShareFrac as number) : null;
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-950/40 overflow-hidden">
@@ -130,18 +238,28 @@ export function LoanSafetyPanel({
 
           {/* what protects the lender */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 space-y-2">
-            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Your protection</p>
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+              {hasPosition ? 'Your protection' : "This loan's collateralisation"}
+            </p>
 
             <ul className="space-y-1.5 text-[11px] text-slate-500">
               <li className="flex gap-2">
                 <span className="text-emerald-400">•</span>
                 <span>
                   <span className="text-slate-300 font-bold">Over-collateralised.</span>{' '}
-                  {collateralUsd !== null && principalUsd !== null ? (
+                  {hasPosition && myCollateralUsd !== null && myPrincipalUsd !== null ? (
                     <>
-                      {formatUsd(collateralUsd)} locked against {formatUsd(principalUsd)} lent
+                      Your share: {formatUsd(myCollateralUsd)} of collateral secures your {formatUsd(myPrincipalUsd)} contribution
+                      {myCollateralUsd > 0 && (
+                        <> - {formatPercent(myCollateralUsd / myPrincipalUsd - 1)} more than you put in</>
+                      )}
+                      . (Loan total: {formatUsd(collateralUsd ?? 0)} collateral against {formatUsd(principalUsd ?? 0)} principal.)
+                    </>
+                  ) : collateralUsd !== null && principalUsd !== null ? (
+                    <>
+                      This loan has {formatUsd(collateralUsd)} locked against {formatUsd(principalUsd)} principal
                       {collateralUsd > 0 && (
-                        <> — {formatPercent(collateralUsd / principalUsd - 1)} more than the loan</>
+                        <> - {formatPercent(collateralUsd / principalUsd - 1)} more than the loan</>
                       )}.
                     </>
                   ) : (
@@ -156,7 +274,7 @@ export function LoanSafetyPanel({
                   <span className="text-slate-300 font-bold">Liquidation at {formatPercent(threshold)} LTV.</span>{' '}
                   {dropToLiquidation !== null ? (
                     <>ETH would have to fall <span className="font-mono text-amber-400">{formatPercent(dropToLiquidation)}</span> from
-                    today&apos;s price before you can seize the collateral.</>
+                    today&apos;s price before any contributor can trigger liquidation{hasPosition ? ' and recover your pro-rata share' : ''}.</>
                   ) : (
                     <>Triggered when collateral value falls far enough against the debt.</>
                   )}
@@ -167,7 +285,8 @@ export function LoanSafetyPanel({
                 <span>
                   <span className="text-slate-300 font-bold">Missed deadline.</span>{' '}
                   If they haven&apos;t repaid {durationDays} days after funding, plus a 2-day grace
-                  period, you can liquidate regardless of price.
+                  period, any contributor to the pool{hasPosition ? ' - including you' : ''} can trigger
+                  liquidation regardless of price; proceeds split pro-rata across every contributor.
                 </span>
               </li>
             </ul>
@@ -178,16 +297,19 @@ export function LoanSafetyPanel({
             <p className="text-[10px] font-bold text-amber-400/90 uppercase tracking-widest">What can go wrong</p>
             <ul className="space-y-1 text-[11px] text-amber-400/70">
               <li>
-                Liquidation is <span className="font-bold">not automatic</span> — you have to call it.
-                Nothing seizes the collateral on your behalf.
+                Liquidation is <span className="font-bold">not automatic</span> - any contributor has to
+                call it themselves. Nothing seizes the collateral automatically on anyone&apos;s behalf.
               </li>
               <li>
-                Liquidation recovers <span className="font-bold">only what you are owed</span> — the
-                surplus collateral returns to the borrower, so it makes you whole rather than
-                paying out the full deposit.
-                {collateralAtThreshold !== null && (
-                  <> At the threshold the collateral is worth about {formatUsd(collateralAtThreshold)}.</>
-                )}
+                Liquidation recovers <span className="font-bold">only what is owed</span> - the
+                surplus collateral returns to the borrower, so it makes the pool whole rather than
+                paying out the full deposit
+                {hasPosition ? ', and your own recovery is capped at your pro-rata share' : ''}.
+                {hasPosition && myCollateralAtThreshold !== null ? (
+                  <> At the threshold your share of the collateral is worth about {formatUsd(myCollateralAtThreshold)}.</>
+                ) : collateralAtThreshold !== null ? (
+                  <> At the threshold the loan&apos;s collateral is worth about {formatUsd(collateralAtThreshold)}.</>
+                ) : null}
               </li>
               <li>
                 A crash faster than you react can still leave the collateral worth less than the
@@ -216,6 +338,48 @@ export function LoanSafetyPanel({
                   <span className="text-slate-700"> / 1.000</span>
                 </p>
               </div>
+
+              <p className="text-[10px] text-slate-500">
+                {assessment.modelVersion
+                  ? <>Scored by ML model <span className="font-mono text-slate-400">{assessment.modelVersion}</span> (LightGBM + SHAP)</>
+                  : <>Scored by the rule-based explainable scorer</>}
+              </p>
+
+              {assessment.termSheetCid && assessment.termSheetHash && (
+                <div className="mt-2 rounded-lg border border-slate-700/60 bg-slate-900/40 p-2.5 space-y-1.5">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Term sheet anchored on IPFS</p>
+                  <p className="text-[10px] text-slate-500 break-all">
+                    <a
+                      href={`${PINATA_GATEWAY}${assessment.termSheetCid}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-400 hover:underline font-mono"
+                    >
+                      {assessment.termSheetCid}
+                    </a>
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={verifyTermSheet}
+                      disabled={verifyState === 'checking'}
+                      className="rounded-md border border-slate-600 px-2 py-1 text-[10px] font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      {verifyState === 'checking' ? 'Verifying…' : 'Verify hash & signer'}
+                    </button>
+                    {verifyState === 'verified' && (
+                      <span className="text-[10px] font-semibold text-emerald-400">Verified: hash and borrower signature match</span>
+                    )}
+                    {verifyState === 'mismatch' && (
+                      <span className="text-[10px] font-semibold text-red-400">Mismatch</span>
+                    )}
+                    {verifyState === 'error' && (
+                      <span className="text-[10px] font-semibold text-amber-400">Could not verify</span>
+                    )}
+                  </div>
+                  {verifyDetail && <p className="text-[10px] text-slate-500">{verifyDetail}</p>}
+                </div>
+              )}
 
               <div className="space-y-1">
                 {[...assessment.contributions]
